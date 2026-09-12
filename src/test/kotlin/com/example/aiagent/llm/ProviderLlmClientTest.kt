@@ -3,6 +3,8 @@ package com.example.aiagent.llm
 import com.example.aiagent.agent.ChatMessage
 import com.example.aiagent.agent.Role
 import com.example.aiagent.config.LlmProperties
+import com.example.aiagent.config.OpenRouterPluginProperties
+import com.example.aiagent.config.OpenRouterProperties
 import com.example.aiagent.config.ProviderProperties
 import com.example.aiagent.llm.openai.OpenAiLlmClient
 import com.example.aiagent.llm.openrouter.OpenRouterLlmClient
@@ -11,6 +13,7 @@ import io.mockk.mockk
 import io.mockk.slot
 import io.mockk.verify
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
@@ -36,7 +39,7 @@ class ProviderLlmClientTest {
             baseUrl = URI.create("https://openai.example"),
             defaultModel = "gpt-default",
         ),
-        openrouter = ProviderProperties(
+        openrouter = OpenRouterProperties(
             apiKey = "openrouter-test-key",
             baseUrl = URI.create("https://openrouter.example/api/v1"),
             defaultModel = "openai/router-default",
@@ -61,11 +64,26 @@ class ProviderLlmClientTest {
         assertEquals(URI.create("https://openai.example/v1/chat/completions"), httpRequest.captured.uri())
         assertEquals("Bearer openai-test-key", httpRequest.captured.headers().firstValue("Authorization").orElseThrow())
         assertRequestBody(httpRequest.captured, "chosen-model")
+        assertFalse(requestJson(httpRequest.captured).has("plugins"))
         assertEquals("Ответ", result.content)
         assertEquals("actual-openai-model", result.model)
         assertEquals(12L, result.usage.inputTokens)
         assertEquals(7L, result.usage.outputTokens)
         assertEquals(19L, result.usage.totalTokens)
+    }
+
+    @Test
+    fun `OpenAI omits plugins configured for OpenRouter`() {
+        val httpRequest = slot<HttpRequest>()
+        respond(httpRequest, successResponse("actual-openai-model"))
+        val configuredProperties = properties.withOpenRouterPlugins(
+            OpenRouterPluginProperties(id = "web", enabled = true),
+        )
+        val client = OpenAiLlmClient(configuredProperties, jsonMapper, httpClient)
+
+        client.chat(request)
+
+        assertFalse(requestJson(httpRequest.captured).has("plugins"))
     }
 
     @Test
@@ -86,8 +104,82 @@ class ProviderLlmClientTest {
             httpRequest.captured.headers().firstValue("Authorization").orElseThrow(),
         )
         assertRequestBody(httpRequest.captured, "anthropic/claude-test")
+        assertFalse(requestJson(httpRequest.captured).has("plugins"))
         assertEquals("anthropic/actual-model", result.model)
         assertEquals(19L, result.usage.totalTokens)
+    }
+
+    @Test
+    fun `OpenRouter serializes a disabled plugin in the HTTP request`() {
+        val httpRequest = slot<HttpRequest>()
+        respond(httpRequest, successResponse("openai/actual-model"))
+        val client = OpenRouterLlmClient(
+            properties.withOpenRouterPlugins(
+                OpenRouterPluginProperties(id = "context-compression", enabled = false),
+            ),
+            jsonMapper,
+            httpClient,
+        )
+
+        client.chat(request.copy(model = "openai/gpt-test"))
+
+        val plugins = requestJson(httpRequest.captured)["plugins"]
+        assertEquals(1, plugins.size())
+        assertEquals("context-compression", plugins[0]["id"].stringValue())
+        assertEquals(false, plugins[0]["enabled"].booleanValue())
+    }
+
+    @Test
+    fun `OpenRouter serializes an enabled plugin in the HTTP request`() {
+        val httpRequest = slot<HttpRequest>()
+        respond(httpRequest, successResponse("openai/actual-model"))
+        val client = OpenRouterLlmClient(
+            properties.withOpenRouterPlugins(
+                OpenRouterPluginProperties(id = "web", enabled = true),
+            ),
+            jsonMapper,
+            httpClient,
+        )
+
+        client.chat(request.copy(model = "openai/gpt-test"))
+
+        val plugin = requestJson(httpRequest.captured)["plugins"][0]
+        assertEquals("web", plugin["id"].stringValue())
+        assertEquals(true, plugin["enabled"].booleanValue())
+    }
+
+    @Test
+    fun `OpenRouter preserves plugin order and enabled values in the HTTP request`() {
+        val httpRequest = slot<HttpRequest>()
+        respond(httpRequest, successResponse("openai/actual-model"))
+        val client = OpenRouterLlmClient(
+            properties.withOpenRouterPlugins(
+                OpenRouterPluginProperties(id = "context-compression", enabled = false),
+                OpenRouterPluginProperties(id = "web", enabled = true),
+            ),
+            jsonMapper,
+            httpClient,
+        )
+
+        client.chat(request.copy(model = "openai/gpt-test"))
+
+        val plugins = requestJson(httpRequest.captured)["plugins"]
+        assertEquals(2, plugins.size())
+        assertEquals("context-compression", plugins[0]["id"].stringValue())
+        assertEquals(false, plugins[0]["enabled"].booleanValue())
+        assertEquals("web", plugins[1]["id"].stringValue())
+        assertEquals(true, plugins[1]["enabled"].booleanValue())
+    }
+
+    @Test
+    fun `OpenRouter omits plugins from the HTTP request for an empty configuration`() {
+        val httpRequest = slot<HttpRequest>()
+        respond(httpRequest, successResponse("openai/actual-model"))
+        val client = OpenRouterLlmClient(properties, jsonMapper, httpClient)
+
+        client.chat(request.copy(model = "openai/gpt-test"))
+
+        assertFalse(requestJson(httpRequest.captured).has("plugins"))
     }
 
     @Test
@@ -241,8 +333,7 @@ class ProviderLlmClientTest {
     }
 
     private fun assertRequestBody(httpRequest: HttpRequest, expectedModel: String) {
-        val body = readBody(httpRequest)
-        val json = jsonMapper.readTree(body)
+        val json = requestJson(httpRequest)
 
         assertEquals(expectedModel, json["model"].stringValue())
         assertEquals("system", json["messages"][0]["role"].stringValue())
@@ -250,6 +341,9 @@ class ProviderLlmClientTest {
         assertEquals("user", json["messages"][1]["role"].stringValue())
         assertEquals("Привет", json["messages"][1]["content"].stringValue())
     }
+
+    private fun requestJson(httpRequest: HttpRequest) =
+        jsonMapper.readTree(readBody(httpRequest))
 
     private fun readBody(httpRequest: HttpRequest): String {
         val output = ByteArrayOutputStream()
@@ -274,8 +368,14 @@ class ProviderLlmClientTest {
             }
         })
         completed.join()
+
         return output.toString(StandardCharsets.UTF_8)
     }
+    private fun LlmProperties.withOpenRouterPlugins(
+        vararg plugins: OpenRouterPluginProperties,
+    ): LlmProperties = copy(
+        openrouter = openrouter.copy(plugins = plugins.toList()),
+    )
 
     private fun successResponse(model: String): String =
         """

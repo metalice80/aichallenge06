@@ -7,6 +7,10 @@ llm:
     api-key: ${OPENROUTER_API_KEY:}
     base-url: ${OPENROUTER_BASE_URL:https://openrouter.ai/api/v1}
     default-model: ${OPENROUTER_MODEL:openai/gpt-4o-mini}
+    plugins:
+      - id: context-compression
+        enabled: false
+
   connect-timeout: ${LLM_CONNECT_TIMEOUT:10s}
   request-timeout: ${LLM_REQUEST_TIMEOUT:60s}
   system-prompt: |-

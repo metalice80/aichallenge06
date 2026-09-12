@@ -5,19 +5,13 @@ import com.fasterxml.jackson.annotation.JsonProperty
 
 internal data class ChatCompletionsRequest(
     val model: String,
-    val messages: List<ChatCompletionsMessage>,
-    val plugins: List<Plugin>
+    val messages: List<ChatCompletionsMessage>
 )
 
 internal data class ChatCompletionsMessage(
     val role: String,
     val content: String,
 )
-
-internal data class Plugin(
-    val id: String,
-    val enabled: Boolean
-) 
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 internal data class ChatCompletionsResponse(

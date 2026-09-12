@@ -18,7 +18,6 @@ import com.example.aiagent.llm.TokenUsage
 import com.example.aiagent.llm.compatible.dto.ChatCompletionsRequest
 import com.example.aiagent.llm.compatible.dto.ChatCompletionsResponse
 import com.example.aiagent.llm.compatible.dto.ChatCompletionsMessage
-import com.example.aiagent.llm.compatible.dto.Plugin
 import tools.jackson.databind.ObjectMapper
 import java.io.IOException
 import java.net.URI
@@ -45,18 +44,7 @@ abstract class OpenAiCompatibleLlmClient(
         validateModel(request.model)
 
         val body = try {
-            jsonMapper.writeValueAsString(
-                ChatCompletionsRequest(
-                    model = request.model,
-                    messages = request.messages.map { message ->
-                        ChatCompletionsMessage(
-                            role = message.role.toApiRole(),
-                            content = message.content,
-                        )
-                    },
-                    plugins = listOf(Plugin("context-compression", false)) 
-                ),
-            )
+            jsonMapper.writeValueAsString(createChatCompletionsRequest(request))
         } catch (exception: RuntimeException) {
             throw LlmRequestException(provider, cause = exception)
         }
@@ -90,6 +78,17 @@ abstract class OpenAiCompatibleLlmClient(
 
         return parseResponse(response.body())
     }
+
+    protected open fun createChatCompletionsRequest(request: LlmRequest): Any =
+        ChatCompletionsRequest(
+            model = request.model,
+            messages = request.messages.map { message ->
+                ChatCompletionsMessage(
+                    role = message.role.toApiRole(),
+                    content = message.content,
+                )
+            },
+        )
 
     protected open fun validateModel(model: String) {
         if (model.isBlank()) {

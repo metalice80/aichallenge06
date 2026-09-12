@@ -67,6 +67,32 @@ export OPENROUTER_MODEL="openai/gpt-4o-mini"
 
 API keys не включаются в frontend, REST responses или логи. System prompt находится в `src/main/resources/application.yml`.
 
+### OpenRouter plugins
+
+Plugins настраиваются только для OpenRouter в `application.yml` и передаются в JSON request body этого provider. Один отключённый plugin:
+
+```yaml
+llm:
+  openrouter:
+    plugins:
+      - id: context-compression
+        enabled: false
+```
+
+Несколько plugins:
+
+```yaml
+llm:
+  openrouter:
+    plugins:
+      - id: context-compression
+        enabled: false
+      - id: web
+        enabled: true
+```
+
+Порядок сохраняется. `enabled: false` передаётся provider без удаления элемента. При отсутствии настройки или при `plugins: []` поле `plugins` не добавляется в request. Plugin IDs не ограничены списком в приложении; пустой `id` останавливает запуск из-за ошибки configuration validation. OpenAI request не содержит OpenRouter plugins.
+
 ## Persistent context
 
 При первом запуске приложение создаёт родительскую директорию, SQLite-файл и две таблицы:
