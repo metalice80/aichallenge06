@@ -18,6 +18,27 @@
     </header>
 
     <section class="chat-panel" aria-label="Диалог">
+        <div class="provider-controls" aria-label="Настройки модели">
+            <label class="provider-field" for="provider-select">
+                <span>Provider</span>
+                <select id="provider-select" name="provider" required>
+                    <option value="">Загрузка...</option>
+                </select>
+            </label>
+            <label class="provider-field provider-field-model" for="model-input">
+                <span>Модель</span>
+                <input
+                    id="model-input"
+                    name="model"
+                    type="text"
+                    maxlength="200"
+                    placeholder="Model ID"
+                    autocomplete="off"
+                    required
+                >
+            </label>
+        </div>
+
         <div id="chat-history" class="chat-history" aria-live="polite" aria-busy="false">
             <div id="empty-state" class="empty-state">
                 <div class="empty-icon" aria-hidden="true">AI</div>
@@ -60,6 +81,7 @@
             <span id="response-time" class="latency-badge">—</span>
         </div>
         <dl class="stats-grid">
+            <div><dt>Provider</dt><dd id="provider-stat">—</dd></div>
             <div><dt>Модель</dt><dd id="model-stat">—</dd></div>
             <div><dt>Входные токены</dt><dd id="input-tokens-stat">—</dd></div>
             <div><dt>Выходные токены</dt><dd id="output-tokens-stat">—</dd></div>

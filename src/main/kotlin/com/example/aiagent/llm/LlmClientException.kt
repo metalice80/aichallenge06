@@ -1,25 +1,41 @@
 package com.example.aiagent.llm
 
-sealed class LlmClientException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
+sealed class LlmClientException(
+    val provider: LlmProvider,
+    message: String,
+    cause: Throwable? = null,
+) : RuntimeException(message, cause)
 
-class MissingApiKeyException : LlmClientException("OPENAI_API_KEY is not configured")
+class MissingApiKeyException(provider: LlmProvider) :
+    LlmClientException(provider, "$provider API key is not configured")
 
-class LlmAuthenticationException : LlmClientException("OpenAI rejected the configured API key")
+class LlmAuthenticationException(provider: LlmProvider) :
+    LlmClientException(provider, "$provider rejected the configured API key")
 
-class LlmRateLimitException : LlmClientException("OpenAI rate limit was exceeded")
+class LlmRateLimitException(provider: LlmProvider) :
+    LlmClientException(provider, "$provider rate limit was exceeded")
 
-class LlmServerException(val statusCode: Int) :
-    LlmClientException("OpenAI server returned HTTP $statusCode")
+class InvalidLlmModelException(provider: LlmProvider, message: String = "$provider model is invalid") :
+    LlmClientException(provider, message)
 
-class LlmTimeoutException(cause: Throwable) : LlmClientException("OpenAI request timed out", cause)
+class LlmServerException(provider: LlmProvider, val statusCode: Int) :
+    LlmClientException(provider, "$provider server returned HTTP $statusCode")
 
-class LlmNetworkException(cause: Throwable) : LlmClientException("OpenAI network request failed", cause)
+class LlmTimeoutException(provider: LlmProvider, cause: Throwable) :
+    LlmClientException(provider, "$provider request timed out", cause)
 
-class InvalidLlmResponseException(cause: Throwable? = null) :
-    LlmClientException("OpenAI returned an invalid response", cause)
+class LlmNetworkException(provider: LlmProvider, cause: Throwable) :
+    LlmClientException(provider, "$provider network request failed", cause)
 
-class LlmRequestException(val statusCode: Int? = null, cause: Throwable? = null) :
-    LlmClientException(
-        statusCode?.let { "OpenAI request failed with HTTP $it" } ?: "OpenAI request could not be created",
-        cause,
-    )
+class InvalidLlmResponseException(provider: LlmProvider, cause: Throwable? = null) :
+    LlmClientException(provider, "$provider returned an invalid response", cause)
+
+class LlmRequestException(
+    provider: LlmProvider,
+    val statusCode: Int? = null,
+    cause: Throwable? = null,
+) : LlmClientException(
+    provider,
+    statusCode?.let { "$provider request failed with HTTP $it" } ?: "$provider request could not be created",
+    cause,
+)

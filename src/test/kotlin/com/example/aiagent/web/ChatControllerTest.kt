@@ -1,9 +1,12 @@
 package com.example.aiagent.web
 
 import com.example.aiagent.agent.Agent
+import com.example.aiagent.agent.AgentRequest
 import com.example.aiagent.agent.AgentResponse
 import com.example.aiagent.agent.ChatMessage
+import com.example.aiagent.agent.LlmProviderOption
 import com.example.aiagent.agent.Role
+import com.example.aiagent.llm.LlmProvider
 import com.example.aiagent.web.dto.ChatRequest
 import io.mockk.every
 import io.mockk.just
@@ -21,7 +24,9 @@ class ChatControllerTest {
 
     @Test
     fun `chat delegates to agent and maps response`() {
-        every { agent.sendMessage("Привет") } returns AgentResponse(
+        val request = AgentRequest("Привет", LlmProvider.OPENROUTER, "openai/gpt-test")
+        every { agent.sendMessage(request) } returns AgentResponse(
+            provider = LlmProvider.OPENROUTER,
             content = "Здравствуйте",
             model = "test-model",
             inputTokens = 8,
@@ -30,15 +35,18 @@ class ChatControllerTest {
             responseTimeMs = 125,
         )
 
-        val response = controller.chat(ChatRequest("Привет"))
+        val response = controller.chat(
+            ChatRequest("Привет", LlmProvider.OPENROUTER, "openai/gpt-test"),
+        )
 
+        assertEquals(LlmProvider.OPENROUTER, response.provider)
         assertEquals("Здравствуйте", response.content)
         assertEquals("test-model", response.model)
         assertEquals(8, response.inputTokens)
         assertEquals(3, response.outputTokens)
         assertEquals(11, response.totalTokens)
         assertEquals(125, response.responseTimeMs)
-        verify(exactly = 1) { agent.sendMessage("Привет") }
+        verify(exactly = 1) { agent.sendMessage(request) }
     }
 
     @Test
@@ -54,6 +62,19 @@ class ChatControllerTest {
         assertEquals(listOf(Role.USER, Role.ASSISTANT), response.map { it.role })
         assertEquals(listOf("Вопрос", "Ответ"), response.map { it.content })
         verify(exactly = 1) { agent.history() }
+    }
+
+    @Test
+    fun `providers expose configured model defaults`() {
+        every { agent.providers() } returns listOf(
+            LlmProviderOption(LlmProvider.OPENAI, "OpenAI", "gpt-default"),
+            LlmProviderOption(LlmProvider.OPENROUTER, "OpenRouter", "openai/router-default"),
+        )
+
+        val response = controller.providers()
+
+        assertEquals(listOf(LlmProvider.OPENAI, LlmProvider.OPENROUTER), response.map { it.provider })
+        assertEquals(listOf("gpt-default", "openai/router-default"), response.map { it.defaultModel })
     }
 
     @Test

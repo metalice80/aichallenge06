@@ -1,6 +1,6 @@
 # AI Agent
 
-Учебное web-приложение на Kotlin и Spring Boot: простой AI-агент с контекстом диалога, прямой интеграцией с OpenAI API, статистикой токенов и времени ответа.
+Учебное web-приложение на Kotlin и Spring Boot: AI-агент с OpenAI/OpenRouter, общим контекстом диалога, SQLite persistence и статистикой запросов.
 
 ## Стек
 
@@ -18,47 +18,54 @@ Spring AI, LangChain и LangChain4j не используются.
 ## Архитектура
 
 ```text
-Browser (HTML/CSS/JS)
-        │ HTTP / JSON
-        ▼
-ChatController
-        │
-        ▼
-Agent / ChatAgent
-        ├── LlmClient / OpenAiClient ──► OpenAI Chat Completions API
-        └── ConversationRepository / SqliteConversationRepository ──► SQLite
+                         ┌─► OpenAiLlmClient ─────► OpenAI
+Browser ─► Controller ─► Agent ─► LlmClientResolver
+                         └─► OpenRouterLlmClient ─► OpenRouter
+              │
+              └─► ConversationRepository ─► SQLite
 ```
 
-- `ChatController` отвечает только за REST-контракт, validation и вызов `Agent`.
-- `ChatAgent` добавляет system prompt, формирует контекст, измеряет LLM-вызов и сохраняет только завершённые пары `USER + ASSISTANT`.
-- `Conversation` содержит восстановленную историю одного активного чата.
-- `ConversationRepository` изолирует Agent от деталей persistence.
-- `SqliteConversationRepository` создаёт схему, сохраняет сообщения и восстанавливает их в порядке добавления.
-- `OpenAiClient` выполняет HTTP-запрос, аутентификацию, JSON-преобразование и переводит OpenAI DTO во внутренние модели.
+- `ChatController` отвечает за REST-контракт, validation и вызов provider-neutral `Agent`.
+- `ChatAgent` зависит только от `LlmClientResolver`, `Conversation` и `ConversationRepository`; URL, API keys и HTTP headers providers ему неизвестны.
+- `DefaultLlmClientResolver` выбирает реализацию общего `LlmClient` по `LlmProvider`.
+- `OpenAiLlmClient` и `OpenRouterLlmClient` — отдельные infrastructure clients для OpenAI-compatible Chat Completions API.
+- `Conversation` остаётся provider-neutral: provider и model можно менять между сообщениями без потери контекста.
+- `SqliteConversationRepository` сохраняет только завершённые пары `USER + ASSISTANT` и восстанавливает их после перезапуска.
 - При ошибке LLM память и SQLite не изменяются. При ошибке сохранения in-memory состояние откатывается.
 
 Текущая учебная версия обслуживает один общий активный диалог. История переживает перезапуск приложения.
 
 ## Настройка
 
-API key передаётся только через переменную окружения и не включается в frontend или исходный код:
+OpenAI:
 
 ```bash
 export OPENAI_API_KEY="sk-..."
+export OPENAI_MODEL="gpt-4.1-mini"
 ```
 
-Доступные параметры:
+OpenRouter:
+
+```bash
+export OPENROUTER_API_KEY="..."
+export OPENROUTER_MODEL="openai/gpt-4o-mini"
+```
+
+Все параметры:
 
 | Переменная | Значение по умолчанию | Назначение |
 |---|---|---|
 | `OPENAI_API_KEY` | пусто | OpenAI API key |
-| `OPENAI_MODEL` | `gpt-4.1-mini` | модель Chat Completions API |
-| `OPENAI_BASE_URL` | `https://api.openai.com` | базовый URL API |
-| `OPENAI_CONNECT_TIMEOUT` | `10s` | timeout соединения |
-| `OPENAI_REQUEST_TIMEOUT` | `60s` | timeout запроса |
+| `OPENAI_MODEL` | `gpt-4.1-mini` | модель OpenAI по умолчанию |
+| `OPENAI_BASE_URL` | `https://api.openai.com` | базовый URL OpenAI |
+| `OPENROUTER_API_KEY` | пусто | OpenRouter API key |
+| `OPENROUTER_MODEL` | `openai/gpt-4o-mini` | модель OpenRouter по умолчанию |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | базовый URL OpenRouter |
+| `LLM_CONNECT_TIMEOUT` | `10s` | timeout соединения обоих clients |
+| `LLM_REQUEST_TIMEOUT` | `60s` | timeout запроса обоих clients |
 | `AGENT_DB_PATH` | `./data/agent.db` | путь к SQLite database |
 
-System prompt находится в `src/main/resources/application.yml` и меняется без правки `ChatAgent` или `OpenAiClient`.
+API keys не включаются в frontend, REST responses или логи. System prompt находится в `src/main/resources/application.yml`.
 
 ## Persistent context
 
@@ -87,9 +94,17 @@ export AGENT_DB_PATH=\"./data/local-agent.db\"
 
 После запуска открыть <http://localhost:8080>.
 
-Без `OPENAI_API_KEY` приложение запускается, но запрос чата вернёт понятную ошибку конфигурации. Это позволяет открыть UI и проверить reset без секрета.
+Без API keys приложение запускается: UI, история и reset доступны, а запрос к выбранному provider вернёт понятную ошибку его конфигурации.
 
 ## REST API
+
+### Доступные providers
+
+```http
+GET /api/chat/providers
+```
+
+Возвращает `OPENAI`, `OPENROUTER` и настроенные default models. UI использует endpoint для selector и позволяет вручную изменить model id.
 
 ### История диалога
 
@@ -105,13 +120,16 @@ GET /api/chat/history
 POST /api/chat
 Content-Type: application/json
 
-{"message":"Что такое JVM?"}
+{"message":"Что такое JVM?","provider":"OPENAI","model":"gpt-4.1-mini"}
 ```
+
+OpenRouter использует тот же контракт с provider `OPENROUTER` и model id формата `provider/model`, например `anthropic/claude-...`.
 
 Успешный ответ:
 
 ```json
 {
+  "provider": "OPENAI",
   "content": "JVM — это виртуальная машина Java...",
   "model": "gpt-4.1-mini",
   "inputTokens": 120,
@@ -121,7 +139,7 @@ Content-Type: application/json
 }
 ```
 
-Token usage может быть `null`, если OpenAI не вернул соответствующее значение.
+Token usage может быть `null`, если выбранный provider не вернул соответствующее значение. Статистика UI показывает provider, фактическую модель ответа, токены и backend response time.
 
 ### Сброс диалога
 
@@ -136,10 +154,10 @@ POST /api/chat/reset
 API возвращает JSON вида:
 
 ```json
-{"message":"Не удалось получить ответ от модели. Попробуйте ещё раз."}
+{"message":"Не удалось получить ответ от OpenRouter. Попробуйте ещё раз."}
 ```
 
-Обрабатываются пустые и слишком длинные сообщения, отсутствующий ключ, ответы OpenAI `401`, `429`, `5xx`, timeout, network error и некорректный JSON/response. Техническая причина логируется только на backend; stack trace и API key клиенту не возвращаются.
+Обрабатываются отсутствующие provider-specific API keys, authentication, rate limit, timeout, недоступность provider, invalid model, неверный OpenRouter model id и некорректный API response. Техническая причина логируется только на backend; stack trace и API keys клиенту не возвращаются.
 
 ## Тесты и сборка
 
@@ -148,4 +166,4 @@ API возвращает JSON вида:
 ./gradlew build
 ```
 
-Unit-тесты не обращаются к OpenAI. `LlmClient` мокируется при проверке system prompt, восстановленной истории, сохранения, reset и rollback после ошибки. Integration-тест использует отдельный временный SQLite-файл и проверяет `save → load`, повторное создание repository и persisted reset. Отдельно проверяются HTTP/status/JSON-преобразования `OpenAiClient` и делегирование controller.
+Unit-тесты проверяют выбор OpenAI/OpenRouter, forwarding модели, смену provider внутри общей Conversation, статистику, восстановление, reset и rollback. HTTP client tests без реальных API keys проверяют отдельные Authorization headers, endpoints, request body, messages и usage mapping обоих providers. SQLite integration-тест использует отдельный временный файл и проверяет `save → load` и persisted reset.

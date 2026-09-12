@@ -1,9 +1,11 @@
 package com.example.aiagent.web
 
 import com.example.aiagent.agent.Agent
+import com.example.aiagent.agent.AgentRequest
 import com.example.aiagent.agent.Role
 import com.example.aiagent.web.dto.ChatRequest
 import com.example.aiagent.web.dto.ChatHistoryResponse
+import com.example.aiagent.web.dto.LlmProviderOptionResponse
 import com.example.aiagent.web.dto.ChatResponse
 import jakarta.validation.Valid
 import org.springframework.http.ResponseEntity
@@ -24,9 +26,21 @@ class ChatController(
             .filterNot { it.role == Role.SYSTEM }
             .map(ChatHistoryResponse::from)
 
+    @GetMapping("/providers")
+    fun providers(): List<LlmProviderOptionResponse> =
+        agent.providers().map(LlmProviderOptionResponse::from)
+
     @PostMapping
     fun chat(@Valid @RequestBody request: ChatRequest): ChatResponse =
-        ChatResponse.from(agent.sendMessage(request.message))
+        ChatResponse.from(
+            agent.sendMessage(
+                AgentRequest(
+                    message = request.message,
+                    provider = request.provider,
+                    model = request.model,
+                ),
+            ),
+        )
 
     @PostMapping("/reset")
     fun reset(): ResponseEntity<Void> {

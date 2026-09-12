@@ -2,6 +2,8 @@ const chatForm = document.querySelector('#chat-form');
 const chatHistory = document.querySelector('#chat-history');
 const emptyState = document.querySelector('#empty-state');
 const messageInput = document.querySelector('#message-input');
+const providerSelect = document.querySelector('#provider-select');
+const modelInput = document.querySelector('#model-input');
 const sendButton = document.querySelector('#send-button');
 const resetButton = document.querySelector('#reset-button');
 const loadingMessage = document.querySelector('#loading-message');
@@ -20,6 +22,18 @@ chatForm.addEventListener('submit', async (event) => {
         messageInput.focus();
         return;
     }
+    const provider = providerSelect.value;
+    const model = modelInput.value.trim();
+    if (!provider) {
+        showError('Выберите provider.');
+        providerSelect.focus();
+        return;
+    }
+    if (!model) {
+        showError('Введите model id.');
+        modelInput.focus();
+        return;
+    }
 
     clearError();
     const userElement = appendMessage('user', 'Вы', message);
@@ -30,7 +44,7 @@ chatForm.addEventListener('submit', async (event) => {
         const response = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message }),
+            body: JSON.stringify({ message, provider, model }),
         });
         const payload = await readJson(response);
         if (!response.ok) {
@@ -83,36 +97,78 @@ messageInput.addEventListener('keydown', (event) => {
         chatForm.requestSubmit();
     }
 });
-void loadHistory();
+providerSelect.addEventListener('change', () => {
+    const option = providerSelect.selectedOptions[0];
+    modelInput.value = option?.dataset.defaultModel || '';
+});
 
-async function loadHistory() {
+void initialize();
+
+async function initialize() {
     setBusy(true);
     loadingMessage.hidden = true;
     try {
-        const response = await fetch('/api/chat/history');
-        const payload = await readJson(response);
-        if (!response.ok) {
-            throw new Error(payload?.message || 'Не удалось восстановить историю чата.');
-        }
-        if (!Array.isArray(payload)) {
-            throw new Error('Сервер вернул некорректную историю чата.');
-        }
-
-        payload.forEach((message) => {
-            if (message?.role === 'USER' && typeof message.content === 'string') {
-                appendMessage('user', 'Вы', message.content);
-            } else if (message?.role === 'ASSISTANT' && typeof message.content === 'string') {
-                appendMessage('agent', 'Агент', message.content);
-            }
-        });
+        await loadProviders();
+        await loadHistory();
     } catch (error) {
-        showError(error instanceof Error ? error.message : 'Не удалось восстановить историю чата.');
+        showError(error instanceof Error ? error.message : 'Не удалось загрузить настройки чата.');
     } finally {
         setBusy(false);
         messageInput.focus();
     }
 }
 
+async function loadProviders() {
+    const response = await fetch('/api/chat/providers');
+    const payload = await readJson(response);
+    if (!response.ok || !Array.isArray(payload)) {
+        throw new Error(payload?.message || 'Не удалось загрузить список providers.');
+    }
+
+    providerSelect.replaceChildren();
+    payload.forEach((provider) => {
+        if (
+            typeof provider?.provider !== 'string'
+            || typeof provider?.displayName !== 'string'
+            || typeof provider?.defaultModel !== 'string'
+        ) {
+            return;
+        }
+
+        const option = document.createElement('option');
+        option.value = provider.provider;
+        option.textContent = provider.displayName;
+        option.dataset.defaultModel = provider.defaultModel;
+        providerSelect.append(option);
+    });
+
+    if (!providerSelect.options.length) {
+        throw new Error('Сервер не настроил ни одного LLM provider.');
+    }
+    const openAiOption = Array.from(providerSelect.options)
+        .find((option) => option.value === 'OPENAI');
+    providerSelect.value = (openAiOption || providerSelect.options[0]).value;
+    modelInput.value = providerSelect.selectedOptions[0]?.dataset.defaultModel || '';
+}
+
+async function loadHistory() {
+    const response = await fetch('/api/chat/history');
+    const payload = await readJson(response);
+    if (!response.ok) {
+        throw new Error(payload?.message || 'Не удалось восстановить историю чата.');
+    }
+    if (!Array.isArray(payload)) {
+        throw new Error('Сервер вернул некорректную историю чата.');
+    }
+
+    payload.forEach((message) => {
+        if (message?.role === 'USER' && typeof message.content === 'string') {
+            appendMessage('user', 'Вы', message.content);
+        } else if (message?.role === 'ASSISTANT' && typeof message.content === 'string') {
+            appendMessage('agent', 'Агент', message.content);
+        }
+    });
+}
 
 function appendMessage(role, label, content) {
     emptyState.hidden = true;
@@ -139,6 +195,10 @@ function appendMessage(role, label, content) {
 }
 
 function updateStats(payload) {
+    const providerOption = Array.from(providerSelect.options)
+        .find((option) => option.value === payload.provider);
+    document.querySelector('#provider-stat').textContent =
+        providerOption?.textContent || valueOrDash(payload.provider);
     document.querySelector('#model-stat').textContent = valueOrDash(payload.model);
     document.querySelector('#input-tokens-stat').textContent = valueOrDash(payload.inputTokens);
     document.querySelector('#output-tokens-stat').textContent = valueOrDash(payload.outputTokens);
@@ -156,6 +216,8 @@ function setBusy(value) {
     messageInput.disabled = value;
     sendButton.disabled = value;
     resetButton.disabled = value;
+    providerSelect.disabled = value;
+    modelInput.disabled = value;
     loadingMessage.hidden = !value;
     chatHistory.setAttribute('aria-busy', String(value));
 }

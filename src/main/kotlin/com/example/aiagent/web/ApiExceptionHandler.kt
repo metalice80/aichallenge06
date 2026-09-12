@@ -1,10 +1,13 @@
 package com.example.aiagent.web
 
 import com.example.aiagent.agent.InvalidMessageException
+import com.example.aiagent.llm.InvalidLlmModelException
 import com.example.aiagent.llm.InvalidLlmResponseException
 import com.example.aiagent.llm.LlmAuthenticationException
+import com.example.aiagent.llm.LlmClientException
 import com.example.aiagent.llm.LlmNetworkException
 import com.example.aiagent.llm.LlmRateLimitException
+import com.example.aiagent.llm.LlmProvider
 import com.example.aiagent.llm.LlmRequestException
 import com.example.aiagent.llm.LlmServerException
 import com.example.aiagent.llm.LlmTimeoutException
@@ -32,15 +35,19 @@ class ApiExceptionHandler {
     @ExceptionHandler(HttpMessageNotReadableException::class, InvalidMessageException::class)
     fun handleBadRequest(exception: Exception): ResponseEntity<ApiError> {
         logger.debug("Rejected chat request with {}", exception.javaClass.simpleName)
-        return error(HttpStatus.BAD_REQUEST, "Сообщение не должно быть пустым.")
+        return error(HttpStatus.BAD_REQUEST, "Некорректные параметры запроса.")
     }
 
     @ExceptionHandler(MissingApiKeyException::class)
     fun handleMissingApiKey(exception: MissingApiKeyException): ResponseEntity<ApiError> {
         logger.warn("LLM request rejected: {}", exception.javaClass.simpleName)
+        val environmentVariable = when (exception.provider) {
+            LlmProvider.OPENAI -> "OPENAI_API_KEY"
+            LlmProvider.OPENROUTER -> "OPENROUTER_API_KEY"
+        }
         return error(
             HttpStatus.SERVICE_UNAVAILABLE,
-            "Сервис модели не настроен. Укажите OPENAI_API_KEY.",
+            "Сервис ${exception.provider.displayName} не настроен. Укажите $environmentVariable.",
         )
     }
 
@@ -48,7 +55,7 @@ class ApiExceptionHandler {
     fun handleAuthentication(exception: LlmAuthenticationException): ResponseEntity<ApiError> =
         loggedError(
             HttpStatus.BAD_GATEWAY,
-            "Не удалось авторизоваться в сервисе модели.",
+            "Не удалось авторизоваться в ${exception.provider.displayName}.",
             exception,
         )
 
@@ -56,7 +63,7 @@ class ApiExceptionHandler {
     fun handleRateLimit(exception: LlmRateLimitException): ResponseEntity<ApiError> =
         loggedError(
             HttpStatus.SERVICE_UNAVAILABLE,
-            "Лимит запросов к модели исчерпан. Попробуйте позже.",
+            "Лимит запросов ${exception.provider.displayName} исчерпан. Попробуйте позже.",
             exception,
         )
 
@@ -64,7 +71,15 @@ class ApiExceptionHandler {
     fun handleTimeout(exception: LlmTimeoutException): ResponseEntity<ApiError> =
         loggedError(
             HttpStatus.GATEWAY_TIMEOUT,
-            "Модель не ответила вовремя. Попробуйте ещё раз.",
+            "${exception.provider.displayName} не ответил вовремя. Попробуйте ещё раз.",
+            exception,
+        )
+
+    @ExceptionHandler(InvalidLlmModelException::class)
+    fun handleInvalidModel(exception: InvalidLlmModelException): ResponseEntity<ApiError> =
+        loggedError(
+            HttpStatus.BAD_REQUEST,
+            "Модель недоступна для ${exception.provider.displayName}. Проверьте выбранный model id.",
             exception,
         )
 
@@ -74,10 +89,10 @@ class ApiExceptionHandler {
         LlmRequestException::class,
         InvalidLlmResponseException::class,
     )
-    fun handleLlmFailure(exception: Exception): ResponseEntity<ApiError> =
+    fun handleLlmFailure(exception: LlmClientException): ResponseEntity<ApiError> =
         loggedError(
             HttpStatus.BAD_GATEWAY,
-            "Не удалось получить ответ от модели. Попробуйте ещё раз.",
+            "Не удалось получить ответ от ${exception.provider.displayName}. Попробуйте ещё раз.",
             exception,
         )
 

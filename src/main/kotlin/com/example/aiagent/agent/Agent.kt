@@ -1,8 +1,9 @@
 package com.example.aiagent.agent
 
 interface Agent {
-    fun sendMessage(message: String): AgentResponse
+    fun sendMessage(request: AgentRequest): AgentResponse
     fun history(): List<ChatMessage>
+    fun providers(): List<LlmProviderOption>
 
     fun reset()
 }
