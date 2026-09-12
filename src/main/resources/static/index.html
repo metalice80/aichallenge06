@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Простой AI-агент с поддержкой контекста диалога">
+    <title>AI Agent</title>
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<main class="app-shell">
+    <header class="app-header">
+        <div>
+            <p class="eyebrow">Kotlin · Spring Boot</p>
+            <h1>AI Agent</h1>
+        </div>
+        <span class="status-dot" title="Приложение запущено" aria-label="Приложение запущено"></span>
+    </header>
+
+    <section class="chat-panel" aria-label="Диалог">
+        <div id="chat-history" class="chat-history" aria-live="polite" aria-busy="false">
+            <div id="empty-state" class="empty-state">
+                <div class="empty-icon" aria-hidden="true">AI</div>
+                <h2>Начните новый диалог</h2>
+                <p>Агент запомнит предыдущие сообщения до сброса чата.</p>
+            </div>
+        </div>
+
+        <div id="error-message" class="error-message" role="alert" hidden></div>
+        <div id="loading-message" class="loading-message" role="status" hidden>
+            <span class="loader" aria-hidden="true"></span>
+            Агент отвечает...
+        </div>
+
+        <form id="chat-form" class="composer">
+            <label for="message-input" class="visually-hidden">Введите сообщение</label>
+            <textarea
+                id="message-input"
+                name="message"
+                rows="2"
+                maxlength="4000"
+                placeholder="Введите сообщение..."
+                autocomplete="off"
+                required
+            ></textarea>
+            <div class="composer-actions">
+                <button id="reset-button" class="button button-secondary" type="button">Сбросить чат</button>
+                <button id="send-button" class="button button-primary" type="submit">Отправить</button>
+            </div>
+            <p class="input-hint">Enter — отправить · Shift + Enter — новая строка</p>
+        </form>
+    </section>
+
+    <aside id="stats-panel" class="stats-panel" aria-labelledby="stats-title" hidden>
+        <div class="stats-heading">
+            <div>
+                <p class="eyebrow">Последний запрос</p>
+                <h2 id="stats-title">Статистика</h2>
+            </div>
+            <span id="response-time" class="latency-badge">—</span>
+        </div>
+        <dl class="stats-grid">
+            <div><dt>Модель</dt><dd id="model-stat">—</dd></div>
+            <div><dt>Входные токены</dt><dd id="input-tokens-stat">—</dd></div>
+            <div><dt>Выходные токены</dt><dd id="output-tokens-stat">—</dd></div>
+            <div><dt>Всего токенов</dt><dd id="total-tokens-stat">—</dd></div>
+        </dl>
+    </aside>
+</main>
+<script src="/app.js" defer></script>
+</body>
+</html>

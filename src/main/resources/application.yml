@@ -1,0 +1,14 @@
+openai:
+  api-key: ${OPENAI_API_KEY:}
+  model: ${OPENAI_MODEL:gpt-4.1-mini}
+  base-url: ${OPENAI_BASE_URL:https://api.openai.com}
+  connect-timeout: ${OPENAI_CONNECT_TIMEOUT:10s}
+  request-timeout: ${OPENAI_REQUEST_TIMEOUT:60s}
+  system-prompt: |-
+    Ты полезный AI-ассистент.
+    Отвечай понятно, точно и по существу.
+    Учитывай предыдущие сообщения пользователя в текущем диалоге.
+
+spring:
+  application:
+    name: ai-agent
