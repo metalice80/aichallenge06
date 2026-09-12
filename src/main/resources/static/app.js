@@ -81,7 +81,9 @@ resetButton.addEventListener('click', async () => {
 
         chatHistory.replaceChildren(emptyState);
         emptyState.hidden = false;
-        statsPanel.hidden = true;
+        resetCurrentStats();
+        updateConversationStats({ inputTokens: 0, outputTokens: 0, totalTokens: 0 });
+        statsPanel.hidden = false;
         messageInput.value = '';
     } catch (error) {
         showError(error instanceof Error ? error.message : 'Не удалось сбросить чат.');
@@ -109,7 +111,7 @@ async function initialize() {
     loadingMessage.hidden = true;
     try {
         await loadProviders();
-        await loadHistory();
+        await loadState();
     } catch (error) {
         showError(error instanceof Error ? error.message : 'Не удалось загрузить настройки чата.');
     } finally {
@@ -151,23 +153,26 @@ async function loadProviders() {
     modelInput.value = providerSelect.selectedOptions[0]?.dataset.defaultModel || '';
 }
 
-async function loadHistory() {
-    const response = await fetch('/api/chat/history');
+async function loadState() {
+    const response = await fetch('/api/chat/state');
     const payload = await readJson(response);
     if (!response.ok) {
-        throw new Error(payload?.message || 'Не удалось восстановить историю чата.');
+        throw new Error(payload?.message || 'Не удалось восстановить состояние чата.');
     }
-    if (!Array.isArray(payload)) {
-        throw new Error('Сервер вернул некорректную историю чата.');
+    if (!Array.isArray(payload?.messages)) {
+        throw new Error('Сервер вернул некорректное состояние чата.');
     }
 
-    payload.forEach((message) => {
+    payload.messages.forEach((message) => {
         if (message?.role === 'USER' && typeof message.content === 'string') {
             appendMessage('user', 'Вы', message.content);
         } else if (message?.role === 'ASSISTANT' && typeof message.content === 'string') {
             appendMessage('agent', 'Агент', message.content);
         }
     });
+    resetCurrentStats();
+    updateConversationStats(payload.conversationUsage);
+    statsPanel.hidden = false;
 }
 
 function appendMessage(role, label, content) {
@@ -200,15 +205,42 @@ function updateStats(payload) {
     document.querySelector('#provider-stat').textContent =
         providerOption?.textContent || valueOrDash(payload.provider);
     document.querySelector('#model-stat').textContent = valueOrDash(payload.model);
-    document.querySelector('#input-tokens-stat').textContent = valueOrDash(payload.inputTokens);
-    document.querySelector('#output-tokens-stat').textContent = valueOrDash(payload.outputTokens);
-    document.querySelector('#total-tokens-stat').textContent = valueOrDash(payload.totalTokens);
+    document.querySelector('#current-input-tokens-stat').textContent =
+        formatTokenCount(payload.currentUsage?.inputTokens);
+    document.querySelector('#current-output-tokens-stat').textContent =
+        formatTokenCount(payload.currentUsage?.outputTokens);
+    document.querySelector('#current-total-tokens-stat').textContent =
+        formatTokenCount(payload.currentUsage?.totalTokens);
+    updateConversationStats(payload.conversationUsage);
 
     const milliseconds = Number(payload.responseTimeMs);
     document.querySelector('#response-time').textContent = Number.isFinite(milliseconds)
         ? `${(milliseconds / 1000).toFixed(2)} сек`
         : '—';
     statsPanel.hidden = false;
+}
+
+function updateConversationStats(usage) {
+    document.querySelector('#conversation-input-tokens-stat').textContent =
+        formatTokenCount(usage?.inputTokens, '0');
+    document.querySelector('#conversation-output-tokens-stat').textContent =
+        formatTokenCount(usage?.outputTokens, '0');
+    document.querySelector('#conversation-total-tokens-stat').textContent =
+        formatTokenCount(usage?.totalTokens, '0');
+}
+
+function resetCurrentStats() {
+    document.querySelector('#provider-stat').textContent = '—';
+    document.querySelector('#model-stat').textContent = '—';
+    document.querySelector('#current-input-tokens-stat').textContent = '—';
+    document.querySelector('#current-output-tokens-stat').textContent = '—';
+    document.querySelector('#current-total-tokens-stat').textContent = '—';
+    document.querySelector('#response-time').textContent = '—';
+}
+
+function formatTokenCount(value, fallback = '—') {
+    const number = Number(value);
+    return Number.isFinite(number) ? number.toLocaleString('ru-RU') : fallback;
 }
 
 function setBusy(value) {

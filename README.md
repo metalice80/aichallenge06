@@ -30,10 +30,10 @@ Browser ─► Controller ─► Agent ─► LlmClientResolver
 - `DefaultLlmClientResolver` выбирает реализацию общего `LlmClient` по `LlmProvider`.
 - `OpenAiLlmClient` и `OpenRouterLlmClient` — отдельные infrastructure clients для OpenAI-compatible Chat Completions API.
 - `Conversation` остаётся provider-neutral: provider и model можно менять между сообщениями без потери контекста.
-- `SqliteConversationRepository` сохраняет только завершённые пары `USER + ASSISTANT` и восстанавливает их после перезапуска.
-- При ошибке LLM память и SQLite не изменяются. При ошибке сохранения in-memory состояние откатывается.
+- `SqliteConversationRepository` атомарно сохраняет завершённые пары `USER + ASSISTANT` и usage каждого успешного LLM-вызова.
+- При ошибке LLM память и SQLite не изменяются. При ошибке сохранения in-memory messages и накопленная статистика откатываются.
 
-Текущая учебная версия обслуживает один общий активный диалог. История переживает перезапуск приложения.
+Текущая учебная версия обслуживает один общий активный диалог. История и накопленная статистика токенов переживают перезапуск приложения.
 
 ## Настройка
 
@@ -69,14 +69,19 @@ API keys не включаются в frontend, REST responses или логи. 
 
 ## Persistent context
 
-При первом запуске приложение создаёт родительскую директорию, SQLite-файл и таблицу `chat_message`. Каждое сообщение хранится отдельной строкой с `id`, `role`, `content` и `created_at`. System prompt в базу не записывается и добавляется Agent при каждом LLM-запросе.
+При первом запуске приложение создаёт родительскую директорию, SQLite-файл и две таблицы:
+
+- `chat_message` — сообщения с `id`, `role`, `content` и `created_at`;
+- `llm_request_usage` — usage каждого успешного запроса с provider, model, input/output/total tokens, response time и timestamp.
+
+System prompt в базу не записывается и добавляется Agent при каждом LLM-запросе. Накопленные totals вычисляются как суммы persisted usage, поэтому смена provider или model не сбрасывает статистику.
 
 Чтобы проверить восстановление:
 
 1. запустить приложение и выполнить несколько успешных обменов;
 2. остановить и снова запустить приложение с тем же `AGENT_DB_PATH`;
-3. открыть UI — сохранённые сообщения будут загружены через `GET /api/chat/history`;
-4. задать вопрос, зависящий от предыдущего контекста.
+3. открыть UI — сохранённые сообщения и накопленная статистика будут загружены через `GET /api/chat/state`;
+4. задать вопрос, зависящий от предыдущего контекста: токены нового запроса добавятся к восстановленным totals.
 
 Для отдельной базы:
 
@@ -84,7 +89,7 @@ API keys не включаются в frontend, REST responses или логи. 
 export AGENT_DB_PATH=\"./data/local-agent.db\"
 ```
 
-Очищать SQLite-файл вручную не требуется: кнопка `Сбросить чат` удаляет историю и из памяти, и из persistent storage.
+Очищать SQLite-файл вручную не требуется: кнопка `Сбросить чат` удаляет сообщения и usage текущего диалога из памяти и persistent storage.
 
 ## Запуск
 
@@ -112,7 +117,15 @@ GET /api/chat/providers
 GET /api/chat/history
 ```
 
-Возвращает сохранённые сообщения `USER` и `ASSISTANT` в порядке диалога. UI вызывает endpoint при открытии страницы.
+Возвращает сохранённые сообщения `USER` и `ASSISTANT` в порядке диалога. Endpoint сохранён для клиентов, которым нужна только история.
+
+### Состояние диалога
+
+```http
+GET /api/chat/state
+```
+
+Возвращает видимые сообщения и `conversationUsage`. UI использует этот endpoint при открытии страницы, поэтому накопленные input/output/total tokens восстанавливаются после restart. Статистика последнего запроса после restart не восстанавливается.
 
 ### Отправка сообщения
 
@@ -132,14 +145,21 @@ OpenRouter использует тот же контракт с provider `OPENRO
   "provider": "OPENAI",
   "content": "JVM — это виртуальная машина Java...",
   "model": "gpt-4.1-mini",
-  "inputTokens": 120,
-  "outputTokens": 84,
-  "totalTokens": 204,
+  "currentUsage": {
+    "inputTokens": 120,
+    "outputTokens": 84,
+    "totalTokens": 204
+  },
+  "conversationUsage": {
+    "inputTokens": 620,
+    "outputTokens": 184,
+    "totalTokens": 804
+  },
   "responseTimeMs": 1420
 }
 ```
 
-Token usage может быть `null`, если выбранный provider не вернул соответствующее значение. Статистика UI показывает provider, фактическую модель ответа, токены и backend response time.
+`currentUsage` относится только к последнему успешному вызову. `conversationUsage` — сумма provider-reported usage всех успешных вызовов с момента последнего reset, включая повторно отправленные модели токены истории. Значения current usage могут быть `null`, если provider их не вернул; приложение не выполняет приблизительный локальный подсчёт.
 
 ### Сброс диалога
 
@@ -147,7 +167,7 @@ Token usage может быть `null`, если выбранный provider н�
 POST /api/chat/reset
 ```
 
-Ответ: `204 No Content`. Reset очищает in-memory `Conversation` и SQLite; после перезапуска старый чат не возвращается. Следующий запрос содержит только system prompt и новое сообщение пользователя.
+Ответ: `204 No Content`. Reset очищает in-memory `Conversation`, `chat_message` и `llm_request_usage`; после перезапуска старые messages и totals не возвращаются. Следующий запрос начинает новый контекст и новую статистику с нуля.
 
 ## Ошибки
 
@@ -166,4 +186,4 @@ API возвращает JSON вида:
 ./gradlew build
 ```
 
-Unit-тесты проверяют выбор OpenAI/OpenRouter, forwarding модели, смену provider внутри общей Conversation, статистику, восстановление, reset и rollback. HTTP client tests без реальных API keys проверяют отдельные Authorization headers, endpoints, request body, messages и usage mapping обоих providers. SQLite integration-тест использует отдельный временный файл и проверяет `save → load` и persisted reset.
+Unit-тесты проверяют выбор OpenAI/OpenRouter, provider-reported usage, накопление между providers и models, ошибки, reset и rollback. HTTP client tests без реальных API keys проверяют отдельные Authorization headers, endpoints, request body, messages и usage mapping обоих providers. SQLite integration tests проверяют restart, per-request usage, backward-compatible создание новой таблицы и persisted reset.

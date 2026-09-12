@@ -63,9 +63,9 @@ class ProviderLlmClientTest {
         assertRequestBody(httpRequest.captured, "chosen-model")
         assertEquals("Ответ", result.content)
         assertEquals("actual-openai-model", result.model)
-        assertEquals(12, result.inputTokens)
-        assertEquals(7, result.outputTokens)
-        assertEquals(19, result.totalTokens)
+        assertEquals(12L, result.usage.inputTokens)
+        assertEquals(7L, result.usage.outputTokens)
+        assertEquals(19L, result.usage.totalTokens)
     }
 
     @Test
@@ -87,7 +87,7 @@ class ProviderLlmClientTest {
         )
         assertRequestBody(httpRequest.captured, "anthropic/claude-test")
         assertEquals("anthropic/actual-model", result.model)
-        assertEquals(19, result.totalTokens)
+        assertEquals(19L, result.usage.totalTokens)
     }
 
     @Test
@@ -130,9 +130,28 @@ class ProviderLlmClientTest {
 
         val result = client.chat(request)
 
-        assertNull(result.inputTokens)
-        assertNull(result.outputTokens)
-        assertNull(result.totalTokens)
+        assertNull(result.usage.inputTokens)
+        assertNull(result.usage.outputTokens)
+        assertNull(result.usage.totalTokens)
+    }
+
+    @Test
+    fun `total usage falls back to input plus output when provider omits it`() {
+        val response = """
+            {
+              "model": "actual-model",
+              "choices": [{"message": {"role": "assistant", "content": "Ответ"}}],
+              "usage": {"prompt_tokens": 12, "completion_tokens": 7}
+            }
+        """.trimIndent()
+        respond(slot(), response)
+        val client = OpenAiLlmClient(properties, jsonMapper, httpClient)
+
+        val result = client.chat(request)
+
+        assertEquals(12L, result.usage.inputTokens)
+        assertEquals(7L, result.usage.outputTokens)
+        assertEquals(19L, result.usage.totalTokens)
     }
 
     @Test

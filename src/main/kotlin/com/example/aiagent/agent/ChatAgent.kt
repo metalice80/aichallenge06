@@ -33,6 +33,7 @@ class ChatAgent(
         }
 
         val previousMessages = conversation.messages()
+        val previousTokenUsage = conversation.tokenUsage()
         val userMessage = ChatMessage(Role.USER, content)
         val llmRequest = LlmRequest(
             model = model,
@@ -54,11 +55,17 @@ class ChatAgent(
 
         val assistantMessage = ChatMessage(Role.ASSISTANT, assistantContent)
         conversation.addAll(listOf(userMessage, assistantMessage))
+        conversation.addUsage(llmResponse.usage)
+        val requestUsage = LlmRequestUsage(
+            provider = request.provider,
+            model = llmResponse.model,
+            tokenUsage = llmResponse.usage,
+            responseTimeMs = responseTimeMs,
+        )
         try {
-            conversationRepository.save(conversation)
+            conversationRepository.save(conversation, requestUsage)
         } catch (exception: RuntimeException) {
-            conversation.clear()
-            conversation.addAll(previousMessages)
+            conversation.restore(previousMessages, previousTokenUsage)
             throw exception
         }
 
@@ -66,15 +73,20 @@ class ChatAgent(
             provider = request.provider,
             content = assistantContent,
             model = llmResponse.model,
-            inputTokens = llmResponse.inputTokens,
-            outputTokens = llmResponse.outputTokens,
-            totalTokens = llmResponse.totalTokens,
+            currentUsage = llmResponse.usage,
+            conversationUsage = conversation.tokenUsage(),
             responseTimeMs = responseTimeMs,
         )
     }
 
     @Synchronized
     override fun history(): List<ChatMessage> = conversation.messages()
+
+    @Synchronized
+    override fun state(): AgentState = AgentState(
+        messages = conversation.messages(),
+        conversationUsage = conversation.tokenUsage(),
+    )
 
     override fun providers(): List<LlmProviderOption> =
         llmClientResolver.availableClients().map { client ->

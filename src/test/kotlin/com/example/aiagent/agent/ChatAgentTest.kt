@@ -8,6 +8,7 @@ import com.example.aiagent.llm.LlmNetworkException
 import com.example.aiagent.llm.LlmProvider
 import com.example.aiagent.llm.LlmRequest
 import com.example.aiagent.llm.LlmResponse
+import com.example.aiagent.llm.TokenUsage
 import com.example.aiagent.persistence.ConversationRepository
 import io.mockk.every
 import io.mockk.mockk
@@ -76,8 +77,9 @@ class ChatAgentTest {
     }
 
     @Test
-    fun `successful response is persisted as complete exchange`() {
+    fun `successful response persists the complete exchange and request usage`() {
         every { openAiClient.chat(any()) } returns response("Привет! Чем могу помочь?")
+        val persistedUsage = slot<LlmRequestUsage>()
 
         agent.sendMessage(agentRequest("Привет"))
 
@@ -88,20 +90,28 @@ class ChatAgentTest {
             ),
             conversation.messages(),
         )
-        verify(exactly = 1) { conversationRepository.save(conversation) }
+        verify(exactly = 1) { conversationRepository.save(conversation, capture(persistedUsage)) }
+        assertEquals(LlmProvider.OPENAI, persistedUsage.captured.provider)
+        assertEquals("test-model", persistedUsage.captured.model)
+        assertEquals(TokenUsage(10, 5, 15), persistedUsage.captured.tokenUsage)
     }
 
     @Test
-    fun `provider can change without losing shared conversation`() {
+    fun `usage accumulates across providers and models while current usage stays separate`() {
+        every { openAiClient.chat(any()) } returns response(
+            content = "JVM — это виртуальная машина Java.",
+            model = "gpt-test",
+            usage = TokenUsage(100, 20, 120),
+        )
         val routerRequest = slot<LlmRequest>()
-        every { openAiClient.chat(any()) } returns response("JVM — это виртуальная машина Java.")
         every { openRouterClient.chat(capture(routerRequest)) } returns response(
-            "Она исполняет байт-код.",
-            "google/gemini-test",
+            content = "Она исполняет байт-код.",
+            model = "google/gemini-test",
+            usage = TokenUsage(180, 40, 220),
         )
 
-        agent.sendMessage(agentRequest("Что такое JVM?"))
-        agent.sendMessage(
+        val first = agent.sendMessage(agentRequest("Что такое JVM?"))
+        val second = agent.sendMessage(
             agentRequest(
                 message = "А зачем она нужна?",
                 provider = LlmProvider.OPENROUTER,
@@ -109,6 +119,10 @@ class ChatAgentTest {
             ),
         )
 
+        assertEquals(TokenUsage(100, 20, 120), first.currentUsage)
+        assertEquals(ConversationTokenUsage(100, 20, 120), first.conversationUsage)
+        assertEquals(TokenUsage(180, 40, 220), second.currentUsage)
+        assertEquals(ConversationTokenUsage(280, 60, 340), second.conversationUsage)
         assertEquals(
             listOf(
                 ChatMessage(Role.SYSTEM, "System instruction"),
@@ -121,13 +135,11 @@ class ChatAgentTest {
     }
 
     @Test
-    fun `response statistics include selected provider and model usage`() {
-        every { openRouterClient.chat(any()) } returns LlmResponse(
+    fun `response statistics use provider reported token usage`() {
+        every { openRouterClient.chat(any()) } returns response(
             content = "Ответ",
             model = "openai/gpt-test",
-            inputTokens = 21,
-            outputTokens = 8,
-            totalTokens = 29,
+            usage = TokenUsage(21, 8, 29),
         )
 
         val result = agent.sendMessage(
@@ -140,25 +152,31 @@ class ChatAgentTest {
 
         assertEquals(LlmProvider.OPENROUTER, result.provider)
         assertEquals("openai/gpt-test", result.model)
-        assertEquals(21, result.inputTokens)
-        assertEquals(8, result.outputTokens)
-        assertEquals(29, result.totalTokens)
+        assertEquals(TokenUsage(21, 8, 29), result.currentUsage)
+        assertEquals(ConversationTokenUsage(21, 8, 29), result.conversationUsage)
         assertTrue(result.responseTimeMs >= 0)
     }
 
     @Test
-    fun `reset clears persisted conversation independently of provider`() {
+    fun `reset clears messages token usage and persisted state independently of provider`() {
         every { openAiClient.chat(any()) } returns response("Первый ответ")
         agent.sendMessage(agentRequest("Первый вопрос"))
 
         agent.reset()
 
         assertTrue(conversation.messages().isEmpty())
+        assertEquals(ConversationTokenUsage.ZERO, conversation.tokenUsage())
+        assertEquals(ConversationTokenUsage.ZERO, agent.state().conversationUsage)
         verify(exactly = 1) { conversationRepository.clear() }
     }
 
     @Test
-    fun `failed LLM request leaves memory and persistence unchanged`() {
+    fun `failed LLM request leaves messages usage and persistence unchanged`() {
+        every { openAiClient.chat(any()) } returns response(
+            content = "Сохраненный ответ",
+            usage = TokenUsage(100, 20, 120),
+        )
+        agent.sendMessage(agentRequest("Успешный запрос"))
         every { openRouterClient.chat(any()) } throws LlmNetworkException(
             LlmProvider.OPENROUTER,
             IOException("offline"),
@@ -174,18 +192,20 @@ class ChatAgentTest {
             )
         }
 
-        assertTrue(conversation.messages().isEmpty())
-        verify(exactly = 0) { conversationRepository.save(any()) }
+        assertEquals(2, conversation.messages().size)
+        assertEquals(ConversationTokenUsage(100, 20, 120), agent.state().conversationUsage)
+        verify(exactly = 1) { conversationRepository.save(any(), any()) }
     }
 
     @Test
-    fun `history loaded at startup is sent to a newly selected provider`() {
+    fun `history and usage loaded at startup continue on a newly selected provider`() {
         val persistedConversation = Conversation().apply {
-            addAll(
-                listOf(
+            restore(
+                restoredMessages = listOf(
                     ChatMessage(Role.USER, "Меня зовут Алексей"),
                     ChatMessage(Role.ASSISTANT, "Приятно познакомиться, Алексей"),
                 ),
+                restoredTokenUsage = ConversationTokenUsage(90, 10, 100),
             )
         }
         val loadingRepository = mockk<ConversationRepository>(relaxed = true)
@@ -195,7 +215,7 @@ class ChatAgentTest {
         val request = slot<LlmRequest>()
         every { openRouterClient.chat(capture(request)) } returns response("Вы Алексей", "openai/gpt-test")
 
-        restoredAgent.sendMessage(
+        val result = restoredAgent.sendMessage(
             agentRequest(
                 message = "Как меня зовут?",
                 provider = LlmProvider.OPENROUTER,
@@ -212,19 +232,21 @@ class ChatAgentTest {
             ),
             request.captured.messages,
         )
+        assertEquals(ConversationTokenUsage(100, 15, 115), result.conversationUsage)
         verify(exactly = 1) { loadingRepository.load() }
     }
 
     @Test
-    fun `persistence failure rolls in-memory conversation back`() {
+    fun `persistence failure rolls messages and token usage back`() {
         every { openAiClient.chat(any()) } returns response("Ответ")
-        every { conversationRepository.save(any()) } throws IllegalStateException("database unavailable")
+        every { conversationRepository.save(any(), any()) } throws IllegalStateException("database unavailable")
 
         assertThrows(IllegalStateException::class.java) {
             agent.sendMessage(agentRequest("Вопрос"))
         }
 
         assertTrue(conversation.messages().isEmpty())
+        assertEquals(ConversationTokenUsage.ZERO, conversation.tokenUsage())
     }
 
     @Test
@@ -247,6 +269,7 @@ class ChatAgentTest {
         verify(exactly = 0) { openAiClient.chat(any()) }
         verify(exactly = 0) { openRouterClient.chat(any()) }
         assertTrue(conversation.messages().isEmpty())
+        assertEquals(ConversationTokenUsage.ZERO, conversation.tokenUsage())
     }
 
     private fun agentRequest(
@@ -255,11 +278,13 @@ class ChatAgentTest {
         model: String = "gpt-test",
     ) = AgentRequest(message, provider, model)
 
-    private fun response(content: String, model: String = "test-model") = LlmResponse(
+    private fun response(
+        content: String,
+        model: String = "test-model",
+        usage: TokenUsage = TokenUsage(10, 5, 15),
+    ) = LlmResponse(
         content = content,
         model = model,
-        inputTokens = 10,
-        outputTokens = 5,
-        totalTokens = 15,
+        usage = usage,
     )
 }

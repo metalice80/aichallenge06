@@ -344,6 +344,25 @@ textarea:disabled {
 .stats-heading h2 {
     margin-bottom: 0;
 }
+.stats-section-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.stats-section-heading h3 {
+    margin: 0;
+    font-size: 0.92rem;
+}
+
+.stats-divider {
+    height: 1px;
+    margin: 20px 0;
+    background: var(--border);
+}
+
 
 .latency-badge {
     border-radius: 999px;
@@ -359,6 +378,10 @@ textarea:disabled {
     grid-template-columns: 1fr 2fr repeat(3, 1fr);
     gap: 12px;
     margin: 0;
+}
+
+.stats-grid-conversation {
+    grid-template-columns: repeat(3, 1fr);
 }
 
 .stats-grid div {

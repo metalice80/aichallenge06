@@ -1,11 +1,14 @@
 package com.example.aiagent.web.dto
 
 import com.example.aiagent.agent.AgentResponse
+import com.example.aiagent.agent.AgentState
 import com.example.aiagent.agent.ChatAgent
 import com.example.aiagent.agent.ChatMessage
+import com.example.aiagent.agent.ConversationTokenUsage
 import com.example.aiagent.agent.LlmProviderOption
 import com.example.aiagent.agent.Role
 import com.example.aiagent.llm.LlmProvider
+import com.example.aiagent.llm.TokenUsage
 import jakarta.validation.constraints.NotBlank
 import jakarta.validation.constraints.Size
 
@@ -25,13 +28,41 @@ data class ChatRequest(
     val model: String,
 )
 
+data class TokenUsageResponse(
+    val inputTokens: Long?,
+    val outputTokens: Long?,
+    val totalTokens: Long?,
+) {
+    companion object {
+        fun from(usage: TokenUsage): TokenUsageResponse = TokenUsageResponse(
+            inputTokens = usage.inputTokens,
+            outputTokens = usage.outputTokens,
+            totalTokens = usage.totalTokens,
+        )
+    }
+}
+
+data class ConversationTokenUsageResponse(
+    val inputTokens: Long,
+    val outputTokens: Long,
+    val totalTokens: Long,
+) {
+    companion object {
+        fun from(usage: ConversationTokenUsage): ConversationTokenUsageResponse =
+            ConversationTokenUsageResponse(
+                inputTokens = usage.inputTokens,
+                outputTokens = usage.outputTokens,
+                totalTokens = usage.totalTokens,
+            )
+    }
+}
+
 data class ChatResponse(
     val provider: LlmProvider,
     val content: String,
     val model: String,
-    val inputTokens: Int?,
-    val outputTokens: Int?,
-    val totalTokens: Int?,
+    val currentUsage: TokenUsageResponse,
+    val conversationUsage: ConversationTokenUsageResponse,
     val responseTimeMs: Long,
 ) {
     companion object {
@@ -39,9 +70,8 @@ data class ChatResponse(
             provider = response.provider,
             content = response.content,
             model = response.model,
-            inputTokens = response.inputTokens,
-            outputTokens = response.outputTokens,
-            totalTokens = response.totalTokens,
+            currentUsage = TokenUsageResponse.from(response.currentUsage),
+            conversationUsage = ConversationTokenUsageResponse.from(response.conversationUsage),
             responseTimeMs = response.responseTimeMs,
         )
     }
@@ -69,6 +99,20 @@ data class ChatHistoryResponse(
         fun from(message: ChatMessage): ChatHistoryResponse = ChatHistoryResponse(
             role = message.role,
             content = message.content,
+        )
+    }
+}
+
+data class ChatStateResponse(
+    val messages: List<ChatHistoryResponse>,
+    val conversationUsage: ConversationTokenUsageResponse,
+) {
+    companion object {
+        fun from(state: AgentState): ChatStateResponse = ChatStateResponse(
+            messages = state.messages
+                .filterNot { it.role == Role.SYSTEM }
+                .map(ChatHistoryResponse::from),
+            conversationUsage = ConversationTokenUsageResponse.from(state.conversationUsage),
         )
     }
 }

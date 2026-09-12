@@ -75,18 +75,37 @@
     <aside id="stats-panel" class="stats-panel" aria-labelledby="stats-title" hidden>
         <div class="stats-heading">
             <div>
-                <p class="eyebrow">Последний запрос</p>
-                <h2 id="stats-title">Статистика</h2>
+                <p class="eyebrow">Использование LLM</p>
+                <h2 id="stats-title">Статистика токенов</h2>
             </div>
-            <span id="response-time" class="latency-badge">—</span>
         </div>
-        <dl class="stats-grid">
-            <div><dt>Provider</dt><dd id="provider-stat">—</dd></div>
-            <div><dt>Модель</dt><dd id="model-stat">—</dd></div>
-            <div><dt>Входные токены</dt><dd id="input-tokens-stat">—</dd></div>
-            <div><dt>Выходные токены</dt><dd id="output-tokens-stat">—</dd></div>
-            <div><dt>Всего токенов</dt><dd id="total-tokens-stat">—</dd></div>
-        </dl>
+
+        <section class="stats-section" aria-labelledby="current-stats-title">
+            <div class="stats-section-heading">
+                <h3 id="current-stats-title">Последний запрос</h3>
+                <span id="response-time" class="latency-badge">—</span>
+            </div>
+            <dl class="stats-grid">
+                <div><dt>Provider</dt><dd id="provider-stat">—</dd></div>
+                <div><dt>Модель</dt><dd id="model-stat">—</dd></div>
+                <div><dt>Входные токены</dt><dd id="current-input-tokens-stat">—</dd></div>
+                <div><dt>Выходные токены</dt><dd id="current-output-tokens-stat">—</dd></div>
+                <div><dt>Всего токенов</dt><dd id="current-total-tokens-stat">—</dd></div>
+            </dl>
+        </section>
+
+        <div class="stats-divider" aria-hidden="true"></div>
+
+        <section class="stats-section" aria-labelledby="conversation-stats-title">
+            <div class="stats-section-heading">
+                <h3 id="conversation-stats-title">Весь диалог</h3>
+            </div>
+            <dl class="stats-grid stats-grid-conversation">
+                <div><dt>Входные токены</dt><dd id="conversation-input-tokens-stat">0</dd></div>
+                <div><dt>Выходные токены</dt><dd id="conversation-output-tokens-stat">0</dd></div>
+                <div><dt>Всего токенов</dt><dd id="conversation-total-tokens-stat">0</dd></div>
+            </dl>
+        </section>
     </aside>
 </main>
 <script src="/app.js" defer></script>

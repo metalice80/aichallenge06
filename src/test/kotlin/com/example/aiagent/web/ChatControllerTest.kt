@@ -1,13 +1,17 @@
 package com.example.aiagent.web
 
 import com.example.aiagent.agent.Agent
+import com.example.aiagent.agent.AgentState
 import com.example.aiagent.agent.AgentRequest
 import com.example.aiagent.agent.AgentResponse
 import com.example.aiagent.agent.ChatMessage
+import com.example.aiagent.agent.ConversationTokenUsage
 import com.example.aiagent.agent.LlmProviderOption
 import com.example.aiagent.agent.Role
 import com.example.aiagent.llm.LlmProvider
+import com.example.aiagent.llm.TokenUsage
 import com.example.aiagent.web.dto.ChatRequest
+import com.example.aiagent.web.dto.ConversationTokenUsageResponse
 import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
@@ -29,9 +33,8 @@ class ChatControllerTest {
             provider = LlmProvider.OPENROUTER,
             content = "Здравствуйте",
             model = "test-model",
-            inputTokens = 8,
-            outputTokens = 3,
-            totalTokens = 11,
+            currentUsage = TokenUsage(8, 3, 11),
+            conversationUsage = ConversationTokenUsage(108, 23, 131),
             responseTimeMs = 125,
         )
 
@@ -42,9 +45,12 @@ class ChatControllerTest {
         assertEquals(LlmProvider.OPENROUTER, response.provider)
         assertEquals("Здравствуйте", response.content)
         assertEquals("test-model", response.model)
-        assertEquals(8, response.inputTokens)
-        assertEquals(3, response.outputTokens)
-        assertEquals(11, response.totalTokens)
+        assertEquals(8L, response.currentUsage.inputTokens)
+        assertEquals(3L, response.currentUsage.outputTokens)
+        assertEquals(11L, response.currentUsage.totalTokens)
+        assertEquals(108L, response.conversationUsage.inputTokens)
+        assertEquals(23L, response.conversationUsage.outputTokens)
+        assertEquals(131L, response.conversationUsage.totalTokens)
         assertEquals(125, response.responseTimeMs)
         verify(exactly = 1) { agent.sendMessage(request) }
     }
@@ -62,6 +68,25 @@ class ChatControllerTest {
         assertEquals(listOf(Role.USER, Role.ASSISTANT), response.map { it.role })
         assertEquals(listOf("Вопрос", "Ответ"), response.map { it.content })
         verify(exactly = 1) { agent.history() }
+    }
+
+    @Test
+    fun `state restores visible messages and cumulative usage`() {
+        every { agent.state() } returns AgentState(
+            messages = listOf(
+                ChatMessage(Role.SYSTEM, "System"),
+                ChatMessage(Role.USER, "Вопрос"),
+                ChatMessage(Role.ASSISTANT, "Ответ"),
+            ),
+            conversationUsage = ConversationTokenUsage(280, 60, 340),
+        )
+
+        val response = controller.state()
+
+        assertEquals(listOf(Role.USER, Role.ASSISTANT), response.messages.map { it.role })
+        assertEquals(listOf("Вопрос", "Ответ"), response.messages.map { it.content })
+        assertEquals(ConversationTokenUsageResponse(280, 60, 340), response.conversationUsage)
+        verify(exactly = 1) { agent.state() }
     }
 
     @Test

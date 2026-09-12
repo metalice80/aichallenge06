@@ -5,6 +5,7 @@ import com.example.aiagent.agent.AgentRequest
 import com.example.aiagent.agent.Role
 import com.example.aiagent.web.dto.ChatRequest
 import com.example.aiagent.web.dto.ChatHistoryResponse
+import com.example.aiagent.web.dto.ChatStateResponse
 import com.example.aiagent.web.dto.LlmProviderOptionResponse
 import com.example.aiagent.web.dto.ChatResponse
 import jakarta.validation.Valid
@@ -25,6 +26,9 @@ class ChatController(
         agent.history()
             .filterNot { it.role == Role.SYSTEM }
             .map(ChatHistoryResponse::from)
+
+    @GetMapping("/state")
+    fun state(): ChatStateResponse = ChatStateResponse.from(agent.state())
 
     @GetMapping("/providers")
     fun providers(): List<LlmProviderOptionResponse> =

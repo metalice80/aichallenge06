@@ -14,9 +14,11 @@ import com.example.aiagent.llm.LlmResponse
 import com.example.aiagent.llm.LlmServerException
 import com.example.aiagent.llm.LlmTimeoutException
 import com.example.aiagent.llm.MissingApiKeyException
+import com.example.aiagent.llm.TokenUsage
 import com.example.aiagent.llm.compatible.dto.ChatCompletionsRequest
 import com.example.aiagent.llm.compatible.dto.ChatCompletionsResponse
 import com.example.aiagent.llm.compatible.dto.ChatCompletionsMessage
+import com.example.aiagent.llm.compatible.dto.Plugin
 import tools.jackson.databind.ObjectMapper
 import java.io.IOException
 import java.net.URI
@@ -52,6 +54,7 @@ abstract class OpenAiCompatibleLlmClient(
                             content = message.content,
                         )
                     },
+                    plugins = listOf(Plugin("context-compression", false)) 
                 ),
             )
         } catch (exception: RuntimeException) {
@@ -110,9 +113,11 @@ abstract class OpenAiCompatibleLlmClient(
         return LlmResponse(
             content = content,
             model = model,
-            inputTokens = response.usage?.promptTokens,
-            outputTokens = response.usage?.completionTokens,
-            totalTokens = response.usage?.totalTokens,
+            usage = TokenUsage.fromProvider(
+                inputTokens = response.usage?.promptTokens,
+                outputTokens = response.usage?.completionTokens,
+                totalTokens = response.usage?.totalTokens,
+            ),
         )
     }
 
