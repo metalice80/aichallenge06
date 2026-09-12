@@ -9,6 +9,9 @@ openai:
     Отвечай понятно, точно и по существу.
     Учитывай предыдущие сообщения пользователя в текущем диалоге.
 
+storage:
+  database-path: ${AGENT_DB_PATH:./data/agent.db}
+
 spring:
   application:
     name: ai-agent

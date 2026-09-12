@@ -1,10 +1,12 @@
 package com.example.aiagent.agent
 
 import com.example.aiagent.config.OpenAiProperties
+import com.example.aiagent.config.AgentConfiguration
 import com.example.aiagent.llm.LlmClient
 import com.example.aiagent.llm.LlmNetworkException
 import com.example.aiagent.llm.LlmRequest
 import com.example.aiagent.llm.LlmResponse
+import com.example.aiagent.persistence.ConversationRepository
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
@@ -18,12 +20,13 @@ import java.io.IOException
 class ChatAgentTest {
     private val llmClient = mockk<LlmClient>()
     private val conversation = Conversation()
+    private val conversationRepository = mockk<ConversationRepository>(relaxed = true)
     private val properties = OpenAiProperties(
         apiKey = "test-key",
         model = "test-model",
         systemPrompt = "System instruction",
     )
-    private val agent = ChatAgent(llmClient, conversation, properties)
+    private val agent = ChatAgent(llmClient, conversation, conversationRepository, properties)
 
     @Test
     fun `first message includes system prompt and user message`() {
@@ -61,6 +64,7 @@ class ChatAgentTest {
             ),
             conversation.messages(),
         )
+        verify(exactly = 1) { conversationRepository.save(conversation) }
     }
 
     @Test
@@ -112,6 +116,7 @@ class ChatAgentTest {
             ),
             conversation.messages(),
         )
+        verify(exactly = 1) { conversationRepository.clear() }
     }
 
     @Test
@@ -123,6 +128,7 @@ class ChatAgentTest {
             agent.sendMessage("Повтори запрос")
         }
         assertTrue(conversation.messages().isEmpty())
+        verify(exactly = 0) { conversationRepository.save(any()) }
 
         val retryRequest = slot<LlmRequest>()
         every { llmClient.chat(capture(retryRequest)) } returns response("Готово")
@@ -130,6 +136,49 @@ class ChatAgentTest {
 
         assertEquals(failedRequest.captured.messages, retryRequest.captured.messages)
         assertEquals(2, conversation.messages().size)
+    }
+
+    @Test
+    fun `history loaded at startup is included in the next request`() {
+        val persistedConversation = Conversation().apply {
+            addAll(
+                listOf(
+                    ChatMessage(Role.USER, "Меня зовут Алексей"),
+                    ChatMessage(Role.ASSISTANT, "Приятно познакомиться, Алексей"),
+                ),
+            )
+        }
+        val loadingRepository = mockk<ConversationRepository>(relaxed = true)
+        every { loadingRepository.load() } returns persistedConversation
+        val restoredConversation = AgentConfiguration().conversation(loadingRepository)
+        val restoredAgent = ChatAgent(llmClient, restoredConversation, loadingRepository, properties)
+        val request = slot<LlmRequest>()
+        every { llmClient.chat(capture(request)) } returns response("Вы Алексей")
+
+        restoredAgent.sendMessage("Как меня зовут?")
+
+        assertEquals(
+            listOf(
+                ChatMessage(Role.SYSTEM, "System instruction"),
+                ChatMessage(Role.USER, "Меня зовут Алексей"),
+                ChatMessage(Role.ASSISTANT, "Приятно познакомиться, Алексей"),
+                ChatMessage(Role.USER, "Как меня зовут?"),
+            ),
+            request.captured.messages,
+        )
+        verify(exactly = 1) { loadingRepository.load() }
+    }
+
+    @Test
+    fun `persistence failure rolls in-memory conversation back`() {
+        every { llmClient.chat(any()) } returns response("Ответ")
+        every { conversationRepository.save(any()) } throws IllegalStateException("database unavailable")
+
+        assertThrows(IllegalStateException::class.java) {
+            agent.sendMessage("Вопрос")
+        }
+
+        assertTrue(conversation.messages().isEmpty())
     }
 
     @Test

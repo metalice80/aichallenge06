@@ -2,6 +2,8 @@ package com.example.aiagent.web
 
 import com.example.aiagent.agent.Agent
 import com.example.aiagent.agent.AgentResponse
+import com.example.aiagent.agent.ChatMessage
+import com.example.aiagent.agent.Role
 import com.example.aiagent.web.dto.ChatRequest
 import io.mockk.every
 import io.mockk.just
@@ -37,6 +39,21 @@ class ChatControllerTest {
         assertEquals(11, response.totalTokens)
         assertEquals(125, response.responseTimeMs)
         verify(exactly = 1) { agent.sendMessage("Привет") }
+    }
+
+    @Test
+    fun `history hides system messages and maps persisted chat`() {
+        every { agent.history() } returns listOf(
+            ChatMessage(Role.SYSTEM, "System"),
+            ChatMessage(Role.USER, "Вопрос"),
+            ChatMessage(Role.ASSISTANT, "Ответ"),
+        )
+
+        val response = controller.history()
+
+        assertEquals(listOf(Role.USER, Role.ASSISTANT), response.map { it.role })
+        assertEquals(listOf("Вопрос", "Ответ"), response.map { it.content })
+        verify(exactly = 1) { agent.history() }
     }
 
     @Test

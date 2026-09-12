@@ -83,6 +83,36 @@ messageInput.addEventListener('keydown', (event) => {
         chatForm.requestSubmit();
     }
 });
+void loadHistory();
+
+async function loadHistory() {
+    setBusy(true);
+    loadingMessage.hidden = true;
+    try {
+        const response = await fetch('/api/chat/history');
+        const payload = await readJson(response);
+        if (!response.ok) {
+            throw new Error(payload?.message || 'Не удалось восстановить историю чата.');
+        }
+        if (!Array.isArray(payload)) {
+            throw new Error('Сервер вернул некорректную историю чата.');
+        }
+
+        payload.forEach((message) => {
+            if (message?.role === 'USER' && typeof message.content === 'string') {
+                appendMessage('user', 'Вы', message.content);
+            } else if (message?.role === 'ASSISTANT' && typeof message.content === 'string') {
+                appendMessage('agent', 'Агент', message.content);
+            }
+        });
+    } catch (error) {
+        showError(error instanceof Error ? error.message : 'Не удалось восстановить историю чата.');
+    } finally {
+        setBusy(false);
+        messageInput.focus();
+    }
+}
+
 
 function appendMessage(role, label, content) {
     emptyState.hidden = true;

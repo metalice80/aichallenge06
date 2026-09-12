@@ -2,6 +2,8 @@ package com.example.aiagent.web.dto
 
 import com.example.aiagent.agent.AgentResponse
 import com.example.aiagent.agent.ChatAgent
+import com.example.aiagent.agent.ChatMessage
+import com.example.aiagent.agent.Role
 import jakarta.validation.constraints.NotBlank
 import jakarta.validation.constraints.Size
 
@@ -30,6 +32,18 @@ data class ChatResponse(
             outputTokens = response.outputTokens,
             totalTokens = response.totalTokens,
             responseTimeMs = response.responseTimeMs,
+        )
+    }
+}
+
+data class ChatHistoryResponse(
+    val role: Role,
+    val content: String,
+) {
+    companion object {
+        fun from(message: ChatMessage): ChatHistoryResponse = ChatHistoryResponse(
+            role = message.role,
+            content = message.content,
         )
     }
 }

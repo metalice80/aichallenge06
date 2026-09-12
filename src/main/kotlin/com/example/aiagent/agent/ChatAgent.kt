@@ -4,12 +4,14 @@ import com.example.aiagent.config.OpenAiProperties
 import com.example.aiagent.llm.InvalidLlmResponseException
 import com.example.aiagent.llm.LlmClient
 import com.example.aiagent.llm.LlmRequest
+import com.example.aiagent.persistence.ConversationRepository
 import org.springframework.stereotype.Service
 
 @Service
 class ChatAgent(
     private val llmClient: LlmClient,
     private val conversation: Conversation,
+    private val conversationRepository: ConversationRepository,
     private val properties: OpenAiProperties,
 ) : Agent {
 
@@ -23,11 +25,12 @@ class ChatAgent(
             throw InvalidMessageException("Message must not exceed $MAX_MESSAGE_LENGTH characters")
         }
 
+        val previousMessages = conversation.messages()
         val userMessage = ChatMessage(Role.USER, content)
         val request = LlmRequest(
             messages = buildList {
                 add(ChatMessage(Role.SYSTEM, properties.systemPrompt.trim()))
-                addAll(conversation.messages())
+                addAll(previousMessages)
                 add(userMessage)
             },
         )
@@ -42,6 +45,13 @@ class ChatAgent(
 
         val assistantMessage = ChatMessage(Role.ASSISTANT, assistantContent)
         conversation.addAll(listOf(userMessage, assistantMessage))
+        try {
+            conversationRepository.save(conversation)
+        } catch (exception: RuntimeException) {
+            conversation.clear()
+            conversation.addAll(previousMessages)
+            throw exception
+        }
 
         return AgentResponse(
             content = assistantContent,
@@ -54,7 +64,11 @@ class ChatAgent(
     }
 
     @Synchronized
+    override fun history(): List<ChatMessage> = conversation.messages()
+
+    @Synchronized
     override fun reset() {
+        conversationRepository.clear()
         conversation.clear()
     }
 
