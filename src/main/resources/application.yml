@@ -6,7 +6,7 @@ llm:
   openrouter:
     api-key: ${OPENROUTER_API_KEY:}
     base-url: ${OPENROUTER_BASE_URL:https://openrouter.ai/api/v1}
-    default-model: ${OPENROUTER_MODEL:openai/gpt-4o-mini}
+    default-model: ${OPENROUTER_MODEL:gryphe/mythomax-l2-13b}
     plugins:
       - id: context-compression
         enabled: false
@@ -17,6 +17,27 @@ llm:
     Ты полезный AI-ассистент.
     Отвечай понятно, точно и по существу.
     Учитывай предыдущие сообщения пользователя в текущем диалоге.
+
+context:
+  compression:
+    enabled: ${CONTEXT_COMPRESSION_ENABLED:true}
+    summarize-after-messages: ${CONTEXT_SUMMARIZE_AFTER_MESSAGES:4}
+    summarize-every-messages: ${CONTEXT_SUMMARIZE_EVERY_MESSAGES:2}
+    provider: ${CONTEXT_SUMMARY_PROVIDER:OPENAI}
+    model: ${CONTEXT_SUMMARY_MODEL:gpt-4o-mini}
+    system-prompt: |-
+      Сожми предыдущий диалог в компактное самостоятельное summary.
+      Сохрани важные факты, решения, предпочтения пользователя,
+      технический контекст, ограничения и открытые вопросы.
+      Не добавляй информацию, которой не было в диалоге.
+      Целевой размер summary — не более 320 токенов.
+      Если вся информация не помещается, приоритет
+      1. текущие требования и ограничения;
+      2. точные факты и значения, которые могут понадобиться позже;
+      3. принятые решения;
+      4. текущее состояние задачи;
+      5. открытые вопросы;
+      6. остальной контекст.
 
 storage:
   database-path: ${AGENT_DB_PATH:./data/agent.db}

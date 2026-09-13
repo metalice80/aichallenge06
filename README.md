@@ -93,12 +93,34 @@ llm:
 
 Порядок сохраняется. `enabled: false` передаётся provider без удаления элемента. При отсутствии настройки или при `plugins: []` поле `plugins` не добавляется в request. Plugin IDs не ограничены списком в приложении; пустой `id` останавливает запуск из-за ошибки configuration validation. OpenAI request не содержит OpenRouter plugins.
 
+### Rolling Context Compression
+
+Rolling Summary ограничивает контекст основной модели, не удаляя исходную историю. До первого порога основная LLM получает все сообщения. После compression она получает последнее summary как дополнительное `SYSTEM`-сообщение и только сообщения после persisted cursor. UI и SQLite по-прежнему содержат полную историю.
+
+```yaml
+context:
+  compression:
+    enabled: true
+    summarize-after-messages: 20
+    summarize-every-messages: 10
+    provider: OPENAI
+    model: gpt-5-nano
+    system-prompt: |-
+      Сожми предыдущий диалог в компактное самостоятельное summary.
+      Сохрани важные факты, решения, ограничения и открытые вопросы.
+```
+
+При 20 сообщениях первые 10 входят в initial summary, а последние 10 остаются без изменений. После накопления следующих 10 сообщений summarizer получает только existing summary и Messages 11–20; результат полностью заменяет предыдущее summary. Main provider/model выбираются пользователем, summary provider/model задаются этой конфигурацией и используют тот же `LlmClientResolver`.
+
+Summary и `summarized_message_count` сохраняются в SQLite и восстанавливаются после restart. Ошибка summarizer не удаляет историю и не продвигает cursor. `enabled: false` сохраняет прежнее поведение с полной Conversation без вызова summarizer.
+
 ## Persistent context
 
-При первом запуске приложение создаёт родительскую директорию, SQLite-файл и две таблицы:
+При первом запуске приложение создаёт родительскую директорию, SQLite-файл и три таблицы:
 
-- `chat_message` — сообщения с `id`, `role`, `content` и `created_at`;
-- `llm_request_usage` — usage каждого успешного запроса с provider, model, input/output/total tokens, response time и timestamp.
+- `chat_message` — полная история сообщений с `id`, `role`, `content` и `created_at`;
+- `llm_request_usage` — usage каждого успешного пользовательского запроса с provider, model, input/output/total tokens, response time и timestamp;
+- `conversation_summary` — последнее rolling summary и `summarized_message_count`, атомарно определяющий compression cursor.
 
 System prompt в базу не записывается и добавляется Agent при каждом LLM-запросе. Накопленные totals вычисляются как суммы persisted usage, поэтому смена provider или model не сбрасывает статистику.
 
@@ -115,7 +137,7 @@ System prompt в базу не записывается и добавляетс�
 export AGENT_DB_PATH=\"./data/local-agent.db\"
 ```
 
-Очищать SQLite-файл вручную не требуется: кнопка `Сбросить чат` удаляет сообщения и usage текущего диалога из памяти и persistent storage.
+Очищать SQLite-файл вручную не требуется: кнопка `Сбросить чат` удаляет сообщения, usage, rolling summary и compression cursor из памяти и persistent storage.
 
 ## Запуск
 
@@ -212,4 +234,4 @@ API возвращает JSON вида:
 ./gradlew build
 ```
 
-Unit-тесты проверяют выбор OpenAI/OpenRouter, provider-reported usage, накопление между providers и models, ошибки, reset и rollback. HTTP client tests без реальных API keys проверяют отдельные Authorization headers, endpoints, request body, messages и usage mapping обоих providers. SQLite integration tests проверяют restart, per-request usage, backward-compatible создание новой таблицы и persisted reset.
+Unit-тесты проверяют выбор OpenAI/OpenRouter, plugins, provider-reported usage, rolling thresholds, initial/updated summary, fallback после ошибок и независимые main/summary provider и model. HTTP client tests без реальных API keys проверяют Authorization headers, endpoints, request body, messages и usage mapping обоих providers. SQLite integration tests проверяют restart, per-request usage, backward-compatible schema, summary/cursor update и полный persisted reset.

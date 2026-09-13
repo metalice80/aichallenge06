@@ -1,6 +1,7 @@
 package com.example.aiagent.agent
 
 import com.example.aiagent.config.LlmProperties
+import com.example.aiagent.context.ConversationContextManager
 import com.example.aiagent.llm.InvalidLlmResponseException
 import com.example.aiagent.llm.LlmClientResolver
 import com.example.aiagent.llm.LlmRequest
@@ -13,6 +14,7 @@ class ChatAgent(
     private val conversation: Conversation,
     private val conversationRepository: ConversationRepository,
     private val properties: LlmProperties,
+    private val conversationContextManager: ConversationContextManager,
 ) : Agent {
 
     @Synchronized
@@ -34,12 +36,13 @@ class ChatAgent(
 
         val previousMessages = conversation.messages()
         val previousTokenUsage = conversation.tokenUsage()
+        val previousSummary = conversation.summary()
         val userMessage = ChatMessage(Role.USER, content)
         val llmRequest = LlmRequest(
             model = model,
             messages = buildList {
                 add(ChatMessage(Role.SYSTEM, properties.systemPrompt.trim()))
-                addAll(previousMessages)
+                addAll(conversationContextManager.contextMessages(conversation))
                 add(userMessage)
             },
         )
@@ -65,9 +68,10 @@ class ChatAgent(
         try {
             conversationRepository.save(conversation, requestUsage)
         } catch (exception: RuntimeException) {
-            conversation.restore(previousMessages, previousTokenUsage)
+            conversation.restore(previousMessages, previousTokenUsage, previousSummary)
             throw exception
         }
+        conversationContextManager.compressIfNeeded(conversation)
 
         return AgentResponse(
             provider = request.provider,

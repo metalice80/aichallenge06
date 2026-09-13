@@ -1,7 +1,11 @@
 package com.example.aiagent.agent
 
 import com.example.aiagent.config.AgentConfiguration
+import com.example.aiagent.config.ContextCompressionProperties
 import com.example.aiagent.config.LlmProperties
+import com.example.aiagent.context.ConversationSummarizer
+import com.example.aiagent.context.LlmConversationSummarizer
+import com.example.aiagent.context.RollingConversationContextManager
 import com.example.aiagent.llm.DefaultLlmClientResolver
 import com.example.aiagent.llm.LlmClient
 import com.example.aiagent.llm.LlmNetworkException
@@ -33,7 +37,19 @@ class ChatAgentTest {
     private val conversation = Conversation()
     private val conversationRepository = mockk<ConversationRepository>(relaxed = true)
     private val properties = LlmProperties(systemPrompt = "System instruction")
-    private val agent = ChatAgent(resolver, conversation, conversationRepository, properties)
+    private val summarizer = mockk<ConversationSummarizer>()
+    private val contextManager = RollingConversationContextManager(
+        ContextCompressionProperties(enabled = false),
+        summarizer,
+        conversationRepository,
+    )
+    private val agent = ChatAgent(
+        resolver,
+        conversation,
+        conversationRepository,
+        properties,
+        contextManager,
+    )
 
     @Test
     fun `OpenAI selection sends system prompt user message and chosen model only to OpenAI`() {
@@ -206,12 +222,24 @@ class ChatAgentTest {
                     ChatMessage(Role.ASSISTANT, "Приятно познакомиться, Алексей"),
                 ),
                 restoredTokenUsage = ConversationTokenUsage(90, 10, 100),
+                restoredSummary = null,
             )
         }
         val loadingRepository = mockk<ConversationRepository>(relaxed = true)
         every { loadingRepository.load() } returns persistedConversation
         val restoredConversation = AgentConfiguration().conversation(loadingRepository)
-        val restoredAgent = ChatAgent(resolver, restoredConversation, loadingRepository, properties)
+        val restoredContextManager = RollingConversationContextManager(
+            ContextCompressionProperties(enabled = false),
+            summarizer,
+            loadingRepository,
+        )
+        val restoredAgent = ChatAgent(
+            resolver,
+            restoredConversation,
+            loadingRepository,
+            properties,
+            restoredContextManager,
+        )
         val request = slot<LlmRequest>()
         every { openRouterClient.chat(capture(request)) } returns response("Вы Алексей", "openai/gpt-test")
 
@@ -247,6 +275,112 @@ class ChatAgentTest {
 
         assertTrue(conversation.messages().isEmpty())
         assertEquals(ConversationTokenUsage.ZERO, conversation.tokenUsage())
+    }
+
+    @Test
+    fun `main and summary providers models and token usage remain independent`() {
+        val mainRequest = slot<LlmRequest>()
+        val summaryRequest = slot<LlmRequest>()
+        every { openRouterClient.chat(capture(mainRequest)) } returns response(
+            content = "Main answer",
+            model = "anthropic/main-actual",
+            usage = TokenUsage(21, 8, 29),
+        )
+        every { openAiClient.chat(capture(summaryRequest)) } returns response(
+            content = "Summary v1",
+            model = "summary-actual",
+            usage = TokenUsage(100, 10, 110),
+        )
+        val compressionProperties = ContextCompressionProperties(
+            summarizeAfterMessages = 2,
+            summarizeEveryMessages = 1,
+            provider = LlmProvider.OPENAI,
+            model = "summary-model",
+        )
+        val summaryConversation = Conversation()
+        val summaryContextManager = RollingConversationContextManager(
+            compressionProperties,
+            LlmConversationSummarizer(resolver, compressionProperties),
+            conversationRepository,
+        )
+        val summaryAgent = ChatAgent(
+            resolver,
+            summaryConversation,
+            conversationRepository,
+            properties,
+            summaryContextManager,
+        )
+
+        val result = summaryAgent.sendMessage(
+            agentRequest(
+                message = "Question",
+                provider = LlmProvider.OPENROUTER,
+                model = "anthropic/main-model",
+            ),
+        )
+
+        assertEquals("anthropic/main-model", mainRequest.captured.model)
+        assertEquals("summary-model", summaryRequest.captured.model)
+        assertEquals(ConversationSummary("Summary v1", 1), summaryConversation.summary())
+        assertEquals(TokenUsage(21, 8, 29), result.currentUsage)
+        assertEquals(ConversationTokenUsage(21, 8, 29), result.conversationUsage)
+        verify(exactly = 1) { openRouterClient.chat(any()) }
+        verify(exactly = 1) { openAiClient.chat(any()) }
+    }
+
+    @Test
+    fun `main LLM context contains summary and recent messages without summarized history`() {
+        val previousMessages = (1..30).map { number ->
+            ChatMessage(
+                role = if (number % 2 == 1) Role.USER else Role.ASSISTANT,
+                content = "Message $number",
+            )
+        }
+        val summarizedConversation = Conversation().apply {
+            restore(
+                restoredMessages = previousMessages,
+                restoredTokenUsage = ConversationTokenUsage.ZERO,
+                restoredSummary = ConversationSummary("Summary v2", 20),
+            )
+        }
+        val mainRequest = slot<LlmRequest>()
+        every { openRouterClient.chat(capture(mainRequest)) } returns response("Answer")
+        val summaryContextManager = RollingConversationContextManager(
+            ContextCompressionProperties(
+                summarizeAfterMessages = 200,
+                summarizeEveryMessages = 100,
+                model = "summary-model",
+            ),
+            summarizer,
+            conversationRepository,
+        )
+        val summarizedAgent = ChatAgent(
+            resolver,
+            summarizedConversation,
+            conversationRepository,
+            properties,
+            summaryContextManager,
+        )
+
+        summarizedAgent.sendMessage(
+            agentRequest(
+                message = "New question",
+                provider = LlmProvider.OPENROUTER,
+                model = "openai/main-model",
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                ChatMessage(Role.SYSTEM, "System instruction"),
+                ChatMessage(
+                    Role.SYSTEM,
+                    "${RollingConversationContextManager.SUMMARY_CONTEXT_PREFIX}\nSummary v2",
+                ),
+            ) + previousMessages.drop(20) + ChatMessage(Role.USER, "New question"),
+            mainRequest.captured.messages,
+        )
+        verify(exactly = 0) { summarizer.summarize(any(), any()) }
     }
 
     @Test

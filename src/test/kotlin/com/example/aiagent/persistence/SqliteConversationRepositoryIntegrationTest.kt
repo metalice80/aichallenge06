@@ -3,11 +3,13 @@ package com.example.aiagent.persistence
 import com.example.aiagent.agent.ChatMessage
 import com.example.aiagent.agent.Conversation
 import com.example.aiagent.agent.ConversationTokenUsage
+import com.example.aiagent.agent.ConversationSummary
 import com.example.aiagent.agent.LlmRequestUsage
 import com.example.aiagent.agent.Role
 import com.example.aiagent.llm.LlmProvider
 import com.example.aiagent.llm.TokenUsage
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -91,6 +93,42 @@ class SqliteConversationRepositoryIntegrationTest {
     }
 
     @Test
+    fun `latest rolling summary and cursor survive repository recreation`() {
+        val databasePath = tempDirectory.resolve("summary-restart.db")
+        val firstRepository = repository(databasePath)
+        val conversation = Conversation().apply {
+            addAll(
+                (1..30).map { number ->
+                    ChatMessage(
+                        role = if (number % 2 == 1) Role.USER else Role.ASSISTANT,
+                        content = "Message $number",
+                    )
+                },
+            )
+        }
+        firstRepository.save(conversation)
+        firstRepository.saveSummary(ConversationSummary("Summary v1", 10))
+
+        val firstReload = repository(databasePath).load()
+
+        assertEquals(30, firstReload.messages().size)
+        assertEquals(ConversationSummary("Summary v1", 10), firstReload.summary())
+
+        firstRepository.saveSummary(ConversationSummary("Summary v2", 20))
+        val secondReload = repository(databasePath).load()
+
+        assertEquals(30, secondReload.messages().size)
+        assertEquals(ConversationSummary("Summary v2", 20), secondReload.summary())
+        assertEquals(
+            1,
+            jdbcTemplate(databasePath).queryForObject(
+                "SELECT COUNT(*) FROM conversation_summary",
+                Int::class.java,
+            ),
+        )
+    }
+
+    @Test
     fun `clear removes persisted history and usage across repository recreation`() {
         val databasePath = tempDirectory.resolve("reset.db")
         val firstRepository = repository(databasePath)
@@ -106,12 +144,14 @@ class SqliteConversationRepositoryIntegrationTest {
             conversation,
             requestUsage(LlmProvider.OPENAI, "gpt-test", TokenUsage(10, 5, 15)),
         )
+        firstRepository.saveSummary(ConversationSummary("Old summary", 1))
 
         firstRepository.clear()
         val restoredConversation = repository(databasePath).load()
 
         assertTrue(restoredConversation.messages().isEmpty())
         assertEquals(ConversationTokenUsage.ZERO, restoredConversation.tokenUsage())
+        assertNull(restoredConversation.summary())
         assertEquals(0, jdbcTemplate(databasePath).queryForObject("SELECT COUNT(*) FROM llm_request_usage", Int::class.java))
     }
 
@@ -140,6 +180,7 @@ class SqliteConversationRepositoryIntegrationTest {
 
         assertEquals(listOf(ChatMessage(Role.USER, "Сохраненное сообщение")), restoredConversation.messages())
         assertEquals(ConversationTokenUsage.ZERO, restoredConversation.tokenUsage())
+        assertNull(restoredConversation.summary())
     }
 
     private fun requestUsage(

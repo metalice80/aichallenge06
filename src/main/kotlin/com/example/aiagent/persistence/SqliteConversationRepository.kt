@@ -3,6 +3,7 @@ package com.example.aiagent.persistence
 import com.example.aiagent.agent.ChatMessage
 import com.example.aiagent.agent.Conversation
 import com.example.aiagent.agent.ConversationTokenUsage
+import com.example.aiagent.agent.ConversationSummary
 import com.example.aiagent.agent.LlmRequestUsage
 import com.example.aiagent.agent.Role
 import org.springframework.jdbc.core.ConnectionCallback
@@ -42,6 +43,17 @@ class SqliteConversationRepository(
             )
             """.trimIndent(),
         )
+        jdbcTemplate.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversation_summary (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                content TEXT NOT NULL,
+                summarized_message_count INTEGER NOT NULL CHECK (summarized_message_count > 0),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """.trimIndent(),
+        )
     }
 
     override fun load(): Conversation {
@@ -68,9 +80,21 @@ class SqliteConversationRepository(
                 totalTokens = resultSet.getLong("total_tokens"),
             )
         }
+        val summary = jdbcTemplate.query(
+            """
+            SELECT content, summarized_message_count
+            FROM conversation_summary
+            WHERE id = 1
+            """.trimIndent(),
+        ) { resultSet, _ ->
+            ConversationSummary(
+                content = resultSet.getString("content"),
+                summarizedMessageCount = resultSet.getInt("summarized_message_count"),
+            )
+        }.firstOrNull()
 
         return Conversation().apply {
-            restore(messages, tokenUsage)
+            restore(messages, tokenUsage, summary)
         }
     }
 
@@ -86,7 +110,32 @@ class SqliteConversationRepository(
     }
 
     @Transactional
+    override fun saveSummary(summary: ConversationSummary) {
+        val now = Instant.now().toString()
+        jdbcTemplate.update(
+            """
+            INSERT INTO conversation_summary(
+                id,
+                content,
+                summarized_message_count,
+                created_at,
+                updated_at
+            ) VALUES (1, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                content = excluded.content,
+                summarized_message_count = excluded.summarized_message_count,
+                updated_at = excluded.updated_at
+            """.trimIndent(),
+            summary.content,
+            summary.summarizedMessageCount,
+            now,
+            now,
+        )
+    }
+
+    @Transactional
     override fun clear() {
+        jdbcTemplate.update("DELETE FROM conversation_summary")
         jdbcTemplate.update("DELETE FROM llm_request_usage")
         jdbcTemplate.update("DELETE FROM chat_message")
     }
