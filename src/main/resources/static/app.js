@@ -4,6 +4,10 @@ const emptyState = document.querySelector('#empty-state');
 const messageInput = document.querySelector('#message-input');
 const providerSelect = document.querySelector('#provider-select');
 const modelInput = document.querySelector('#model-input');
+const contextStrategySelect = document.querySelector('#context-strategy-select');
+const branchControls = document.querySelector('#branch-controls');
+const branchSelect = document.querySelector('#branch-select');
+const createBranchButton = document.querySelector('#create-branch-button');
 const sendButton = document.querySelector('#send-button');
 const resetButton = document.querySelector('#reset-button');
 const loadingMessage = document.querySelector('#loading-message');
@@ -24,6 +28,7 @@ chatForm.addEventListener('submit', async (event) => {
     }
     const provider = providerSelect.value;
     const model = modelInput.value.trim();
+    const contextStrategy = contextStrategySelect.value;
     if (!provider) {
         showError('Выберите provider.');
         providerSelect.focus();
@@ -32,6 +37,11 @@ chatForm.addEventListener('submit', async (event) => {
     if (!model) {
         showError('Введите model id.');
         modelInput.focus();
+        return;
+    }
+    if (!contextStrategy) {
+        showError('Выберите context strategy.');
+        contextStrategySelect.focus();
         return;
     }
 
@@ -44,7 +54,7 @@ chatForm.addEventListener('submit', async (event) => {
         const response = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message, provider, model }),
+            body: JSON.stringify({ message, provider, model, contextStrategy }),
         });
         const payload = await readJson(response);
         if (!response.ok) {
@@ -85,6 +95,7 @@ resetButton.addEventListener('click', async () => {
         updateConversationStats({ inputTokens: 0, outputTokens: 0, totalTokens: 0 });
         statsPanel.hidden = false;
         messageInput.value = '';
+        await loadBranches();
     } catch (error) {
         showError(error instanceof Error ? error.message : 'Не удалось сбросить чат.');
     } finally {
@@ -104,6 +115,62 @@ providerSelect.addEventListener('change', () => {
     modelInput.value = option?.dataset.defaultModel || '';
 });
 
+contextStrategySelect.addEventListener('change', async () => {
+    if (busy) return;
+    clearError();
+    updateBranchControls();
+    setBusy(true);
+    try {
+        if (contextStrategySelect.value === 'BRANCHING') {
+            await loadBranches();
+            const activeBranchId = branchSelect.value;
+            if (activeBranchId) {
+                await activateBranch(activeBranchId);
+            }
+        } else {
+            await loadState();
+        }
+    } catch (error) {
+        showError(error instanceof Error ? error.message : 'Не удалось переключить context strategy.');
+    } finally {
+        setBusy(false);
+    }
+});
+
+branchSelect.addEventListener('change', async () => {
+    if (busy || !branchSelect.value) return;
+    clearError();
+    setBusy(true);
+    try {
+        await activateBranch(branchSelect.value);
+        await loadBranches();
+    } catch (error) {
+        showError(error instanceof Error ? error.message : 'Не удалось переключить ветку.');
+    } finally {
+        setBusy(false);
+    }
+});
+
+createBranchButton.addEventListener('click', async () => {
+    if (busy) return;
+    clearError();
+    setBusy(true);
+    try {
+        const response = await fetch('/api/chat/branches', { method: 'POST' });
+        const payload = await readJson(response);
+        if (!response.ok || typeof payload?.id !== 'number') {
+            throw new Error(payload?.message || 'Не удалось создать ветку.');
+        }
+        await loadBranches();
+        await activateBranch(payload.id);
+    } catch (error) {
+        showError(error instanceof Error ? error.message : 'Не удалось создать ветку.');
+    } finally {
+        setBusy(false);
+        messageInput.focus();
+    }
+});
+
 void initialize();
 
 async function initialize() {
@@ -111,7 +178,9 @@ async function initialize() {
     loadingMessage.hidden = true;
     try {
         await loadProviders();
+        await loadContextStrategies();
         await loadState();
+        await loadBranches();
     } catch (error) {
         showError(error instanceof Error ? error.message : 'Не удалось загрузить настройки чата.');
     } finally {
@@ -153,16 +222,89 @@ async function loadProviders() {
     modelInput.value = providerSelect.selectedOptions[0]?.dataset.defaultModel || '';
 }
 
+async function loadContextStrategies() {
+    const response = await fetch('/api/chat/context-strategies');
+    const payload = await readJson(response);
+    if (!response.ok || !Array.isArray(payload)) {
+        throw new Error(payload?.message || 'Не удалось загрузить context strategies.');
+    }
+
+    contextStrategySelect.replaceChildren();
+    payload.forEach((strategy) => {
+        if (typeof strategy?.type !== 'string' || typeof strategy?.displayName !== 'string') {
+            return;
+        }
+        const option = document.createElement('option');
+        option.value = strategy.type;
+        option.textContent = strategy.displayName;
+        contextStrategySelect.append(option);
+    });
+    if (!contextStrategySelect.options.length) {
+        throw new Error('Сервер не настроил context strategies.');
+    }
+    const slidingWindow = Array.from(contextStrategySelect.options)
+        .find((option) => option.value === 'SLIDING_WINDOW');
+    contextStrategySelect.value = (slidingWindow || contextStrategySelect.options[0]).value;
+    updateBranchControls();
+}
+
+async function loadBranches() {
+    const response = await fetch('/api/chat/branches');
+    const payload = await readJson(response);
+    if (!response.ok || !Array.isArray(payload)) {
+        throw new Error(payload?.message || 'Не удалось загрузить ветки.');
+    }
+
+    branchSelect.replaceChildren();
+    payload.forEach((branch) => {
+        if (typeof branch?.id !== 'number' || typeof branch?.name !== 'string') {
+            return;
+        }
+        const option = document.createElement('option');
+        option.value = String(branch.id);
+        option.textContent = branch.name;
+        option.dataset.active = String(branch.active === true);
+        branchSelect.append(option);
+    });
+    const activeOption = Array.from(branchSelect.options)
+        .find((option) => option.dataset.active === 'true');
+    if (activeOption) {
+        branchSelect.value = activeOption.value;
+    }
+    updateBranchControls();
+}
+
+async function activateBranch(branchId) {
+    const response = await fetch(`/api/chat/branches/${encodeURIComponent(branchId)}/activate`, {
+        method: 'POST',
+    });
+    const payload = await readJson(response);
+    if (!response.ok) {
+        throw new Error(payload?.message || 'Не удалось активировать ветку.');
+    }
+    renderChatState(payload);
+}
+
+function updateBranchControls() {
+    branchControls.hidden = contextStrategySelect.value !== 'BRANCHING';
+}
+
+
 async function loadState() {
     const response = await fetch('/api/chat/state');
     const payload = await readJson(response);
     if (!response.ok) {
         throw new Error(payload?.message || 'Не удалось восстановить состояние чата.');
     }
+    renderChatState(payload);
+}
+
+function renderChatState(payload) {
     if (!Array.isArray(payload?.messages)) {
         throw new Error('Сервер вернул некорректное состояние чата.');
     }
-
+    chatHistory.replaceChildren(emptyState);
+    emptyState.hidden = false;
     payload.messages.forEach((message) => {
         if (message?.role === 'USER' && typeof message.content === 'string') {
             appendMessage('user', 'Вы', message.content);
@@ -250,6 +392,9 @@ function setBusy(value) {
     resetButton.disabled = value;
     providerSelect.disabled = value;
     modelInput.disabled = value;
+    contextStrategySelect.disabled = value;
+    branchSelect.disabled = value;
+    createBranchButton.disabled = value;
     loadingMessage.hidden = !value;
     chatHistory.setAttribute('aria-busy', String(value));
 }

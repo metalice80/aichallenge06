@@ -1,11 +1,16 @@
 package com.example.aiagent.agent
 
 import com.example.aiagent.config.AgentConfiguration
-import com.example.aiagent.config.ContextCompressionProperties
+import com.example.aiagent.config.ContextStrategiesProperties
 import com.example.aiagent.config.LlmProperties
-import com.example.aiagent.context.ConversationSummarizer
-import com.example.aiagent.context.LlmConversationSummarizer
-import com.example.aiagent.context.RollingConversationContextManager
+import com.example.aiagent.config.SlidingWindowStrategyProperties
+import com.example.aiagent.context.ContextStateService
+import com.example.aiagent.context.branch.ConversationBranchService
+import com.example.aiagent.context.strategy.ContextPlan
+import com.example.aiagent.context.strategy.ContextStrategy
+import com.example.aiagent.context.strategy.ContextStrategyResolver
+import com.example.aiagent.context.strategy.ContextStrategyType
+import com.example.aiagent.context.strategy.SlidingWindowContextStrategy
 import com.example.aiagent.llm.DefaultLlmClientResolver
 import com.example.aiagent.llm.LlmClient
 import com.example.aiagent.llm.LlmNetworkException
@@ -37,18 +42,23 @@ class ChatAgentTest {
     private val conversation = Conversation()
     private val conversationRepository = mockk<ConversationRepository>(relaxed = true)
     private val properties = LlmProperties(systemPrompt = "System instruction")
-    private val summarizer = mockk<ConversationSummarizer>()
-    private val contextManager = RollingConversationContextManager(
-        ContextCompressionProperties(enabled = false),
-        summarizer,
-        conversationRepository,
+    private val contextStrategy = SlidingWindowContextStrategy(
+        ContextStrategiesProperties(slidingWindow = SlidingWindowStrategyProperties(size = 100)),
     )
+    private val contextStrategyResolver = mockk<ContextStrategyResolver> {
+        every { resolve(any()) } returns contextStrategy
+        every { availableTypes() } returns ContextStrategyType.entries
+    }
+    private val contextStateService = mockk<ContextStateService>(relaxed = true)
+    private val branchService = mockk<ConversationBranchService>(relaxed = true)
     private val agent = ChatAgent(
         resolver,
         conversation,
         conversationRepository,
         properties,
-        contextManager,
+        contextStrategyResolver,
+        contextStateService,
+        branchService,
     )
 
     @Test
@@ -183,7 +193,7 @@ class ChatAgentTest {
         assertTrue(conversation.messages().isEmpty())
         assertEquals(ConversationTokenUsage.ZERO, conversation.tokenUsage())
         assertEquals(ConversationTokenUsage.ZERO, agent.state().conversationUsage)
-        verify(exactly = 1) { conversationRepository.clear() }
+        verify(exactly = 1) { contextStateService.reset() }
     }
 
     @Test
@@ -228,17 +238,14 @@ class ChatAgentTest {
         val loadingRepository = mockk<ConversationRepository>(relaxed = true)
         every { loadingRepository.load() } returns persistedConversation
         val restoredConversation = AgentConfiguration().conversation(loadingRepository)
-        val restoredContextManager = RollingConversationContextManager(
-            ContextCompressionProperties(enabled = false),
-            summarizer,
-            loadingRepository,
-        )
         val restoredAgent = ChatAgent(
             resolver,
             restoredConversation,
             loadingRepository,
             properties,
-            restoredContextManager,
+            contextStrategyResolver,
+            contextStateService,
+            branchService,
         )
         val request = slot<LlmRequest>()
         every { openRouterClient.chat(capture(request)) } returns response("Вы Алексей", "openai/gpt-test")
@@ -278,109 +285,115 @@ class ChatAgentTest {
     }
 
     @Test
-    fun `main and summary providers models and token usage remain independent`() {
-        val mainRequest = slot<LlmRequest>()
-        val summaryRequest = slot<LlmRequest>()
-        every { openRouterClient.chat(capture(mainRequest)) } returns response(
-            content = "Main answer",
-            model = "anthropic/main-actual",
-            usage = TokenUsage(21, 8, 29),
-        )
-        every { openAiClient.chat(capture(summaryRequest)) } returns response(
-            content = "Summary v1",
-            model = "summary-actual",
-            usage = TokenUsage(100, 10, 110),
-        )
-        val compressionProperties = ContextCompressionProperties(
-            summarizeAfterMessages = 2,
-            summarizeEveryMessages = 1,
-            provider = LlmProvider.OPENAI,
-            model = "summary-model",
-        )
-        val summaryConversation = Conversation()
-        val summaryContextManager = RollingConversationContextManager(
-            compressionProperties,
-            LlmConversationSummarizer(resolver, compressionProperties),
-            conversationRepository,
-        )
-        val summaryAgent = ChatAgent(
-            resolver,
-            summaryConversation,
-            conversationRepository,
-            properties,
-            summaryContextManager,
-        )
-
-        val result = summaryAgent.sendMessage(
-            agentRequest(
-                message = "Question",
-                provider = LlmProvider.OPENROUTER,
-                model = "anthropic/main-model",
-            ),
-        )
-
-        assertEquals("anthropic/main-model", mainRequest.captured.model)
-        assertEquals("summary-model", summaryRequest.captured.model)
-        assertEquals(ConversationSummary("Summary v1", 1), summaryConversation.summary())
-        assertEquals(TokenUsage(21, 8, 29), result.currentUsage)
-        assertEquals(ConversationTokenUsage(21, 8, 29), result.conversationUsage)
-        verify(exactly = 1) { openRouterClient.chat(any()) }
-        verify(exactly = 1) { openAiClient.chat(any()) }
-    }
-
-    @Test
-    fun `main LLM context contains summary and recent messages without summarized history`() {
-        val previousMessages = (1..30).map { number ->
-            ChatMessage(
-                role = if (number % 2 == 1) Role.USER else Role.ASSISTANT,
-                content = "Message $number",
-            )
-        }
-        val summarizedConversation = Conversation().apply {
+    fun `selected strategy exclusively determines the main LLM context`() {
+        val strategyConversation = Conversation().apply {
             restore(
-                restoredMessages = previousMessages,
+                restoredMessages = listOf(ChatMessage(Role.USER, "Old history")),
                 restoredTokenUsage = ConversationTokenUsage.ZERO,
-                restoredSummary = ConversationSummary("Summary v2", 20),
+                restoredSummary = ConversationSummary("Must not enter context", 1),
             )
         }
-        val mainRequest = slot<LlmRequest>()
-        every { openRouterClient.chat(capture(mainRequest)) } returns response("Answer")
-        val summaryContextManager = RollingConversationContextManager(
-            ContextCompressionProperties(
-                summarizeAfterMessages = 200,
-                summarizeEveryMessages = 100,
-                model = "summary-model",
-            ),
-            summarizer,
-            conversationRepository,
-        )
-        val summarizedAgent = ChatAgent(
+        val selectedStrategy = mockk<ContextStrategy>(relaxed = true) {
+            every { type } returns ContextStrategyType.STICKY_FACTS
+            every { buildContext(strategyConversation) } returns ContextPlan(
+                listOf(
+                    ChatMessage(Role.SYSTEM, "Persistent fact: language=Kotlin"),
+                    ChatMessage(Role.ASSISTANT, "Recent answer"),
+                ),
+            )
+        }
+        val selectedResolver = mockk<ContextStrategyResolver> {
+            every { resolve(ContextStrategyType.STICKY_FACTS) } returns selectedStrategy
+        }
+        val selectedAgent = ChatAgent(
             resolver,
-            summarizedConversation,
+            strategyConversation,
             conversationRepository,
             properties,
-            summaryContextManager,
+            selectedResolver,
+            contextStateService,
+            branchService,
         )
+        val request = slot<LlmRequest>()
+        every { openRouterClient.chat(capture(request)) } returns response("Answer")
 
-        summarizedAgent.sendMessage(
+        selectedAgent.sendMessage(
             agentRequest(
                 message = "New question",
                 provider = LlmProvider.OPENROUTER,
                 model = "openai/main-model",
+                contextStrategy = ContextStrategyType.STICKY_FACTS,
             ),
         )
 
         assertEquals(
             listOf(
                 ChatMessage(Role.SYSTEM, "System instruction"),
-                ChatMessage(
-                    Role.SYSTEM,
-                    "${RollingConversationContextManager.SUMMARY_CONTEXT_PREFIX}\nSummary v2",
-                ),
-            ) + previousMessages.drop(20) + ChatMessage(Role.USER, "New question"),
-            mainRequest.captured.messages,
+                ChatMessage(Role.SYSTEM, "Persistent fact: language=Kotlin"),
+                ChatMessage(Role.ASSISTANT, "Recent answer"),
+                ChatMessage(Role.USER, "New question"),
+            ),
+            request.captured.messages,
         )
-        verify(exactly = 0) { summarizer.summarize(any(), any()) }
+        verify(exactly = 1) {
+            selectedStrategy.afterSuccessfulExchange(
+                ChatMessage(Role.USER, "New question"),
+                ChatMessage(Role.ASSISTANT, "Answer"),
+            )
+        }
+    }
+
+    @Test
+    fun `switching strategies preserves conversation state and resolves each request independently`() {
+        val switchingConversation = Conversation()
+        val sliding = mockk<ContextStrategy>(relaxed = true) {
+            every { type } returns ContextStrategyType.SLIDING_WINDOW
+            every { buildContext(switchingConversation) } returns ContextPlan(emptyList())
+        }
+        val sticky = mockk<ContextStrategy>(relaxed = true) {
+            every { type } returns ContextStrategyType.STICKY_FACTS
+            every { buildContext(switchingConversation) } answers {
+                ContextPlan(switchingConversation.messages())
+            }
+        }
+        val switchingResolver = mockk<ContextStrategyResolver> {
+            every { resolve(ContextStrategyType.SLIDING_WINDOW) } returns sliding
+            every { resolve(ContextStrategyType.STICKY_FACTS) } returns sticky
+        }
+        val switchingAgent = ChatAgent(
+            resolver,
+            switchingConversation,
+            conversationRepository,
+            properties,
+            switchingResolver,
+            contextStateService,
+            branchService,
+        )
+        val requests = mutableListOf<LlmRequest>()
+        every { openAiClient.chat(capture(requests)) } returnsMany listOf(
+            response("First answer"),
+            response("Second answer"),
+        )
+
+        switchingAgent.sendMessage(
+            agentRequest("First question", contextStrategy = ContextStrategyType.SLIDING_WINDOW),
+        )
+        switchingAgent.sendMessage(
+            agentRequest("Second question", contextStrategy = ContextStrategyType.STICKY_FACTS),
+        )
+
+        assertEquals(4, switchingConversation.messages().size)
+        assertEquals(
+            listOf(
+                ChatMessage(Role.SYSTEM, "System instruction"),
+                ChatMessage(Role.USER, "First question"),
+                ChatMessage(Role.ASSISTANT, "First answer"),
+                ChatMessage(Role.USER, "Second question"),
+            ),
+            requests.last().messages,
+        )
+        verify(exactly = 1) { switchingResolver.resolve(ContextStrategyType.SLIDING_WINDOW) }
+        verify(exactly = 1) { switchingResolver.resolve(ContextStrategyType.STICKY_FACTS) }
     }
 
     @Test
@@ -410,7 +423,8 @@ class ChatAgentTest {
         message: String,
         provider: LlmProvider = LlmProvider.OPENAI,
         model: String = "gpt-test",
-    ) = AgentRequest(message, provider, model)
+        contextStrategy: ContextStrategyType = ContextStrategyType.SLIDING_WINDOW,
+    ) = AgentRequest(message, provider, model, contextStrategy)
 
     private fun response(
         content: String,

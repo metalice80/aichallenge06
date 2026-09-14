@@ -37,6 +37,23 @@
                     required
                 >
             </label>
+            <label class="provider-field" for="context-strategy-select">
+                <span>Context strategy</span>
+                <select id="context-strategy-select" name="contextStrategy" required>
+                    <option value="">Загрузка...</option>
+                </select>
+            </label>
+            <div id="branch-controls" class="branch-controls" hidden>
+                <label class="provider-field" for="branch-select">
+                    <span>Branch</span>
+                    <select id="branch-select" name="branch">
+                        <option value="">Загрузка...</option>
+                    </select>
+                </label>
+                <button id="create-branch-button" class="button button-secondary" type="button">
+                    Создать ветку
+                </button>
+            </div>
         </div>
 
         <div id="chat-history" class="chat-history" aria-live="polite" aria-busy="false">

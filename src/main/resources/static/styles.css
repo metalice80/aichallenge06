@@ -93,7 +93,7 @@ h2 {
 
 .provider-controls {
     display: grid;
-    grid-template-columns: minmax(160px, 0.7fr) minmax(240px, 1.3fr);
+    grid-template-columns: minmax(150px, 0.65fr) minmax(220px, 1.15fr) minmax(170px, 0.8fr);
     gap: 16px;
     border-bottom: 1px solid var(--border);
     padding: 18px 24px;
@@ -133,6 +133,23 @@ h2 {
 .provider-field input:disabled,
 .provider-field select:disabled {
     background: #edf0f3;
+}
+
+.branch-controls {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: minmax(180px, 1fr) auto;
+    gap: 12px;
+    align-items: end;
+    padding-top: 2px;
+}
+
+.branch-controls[hidden] {
+    display: none;
+}
+
+.branch-controls .button {
+    min-height: 42px;
 }
 
 .chat-history {
@@ -430,6 +447,10 @@ textarea:disabled {
         grid-template-columns: 1fr;
         gap: 12px;
         padding: 16px;
+    }
+
+    .branch-controls {
+        grid-template-columns: 1fr;
     }
 
     .chat-history {

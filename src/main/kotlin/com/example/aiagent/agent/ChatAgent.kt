@@ -1,7 +1,11 @@
 package com.example.aiagent.agent
 
 import com.example.aiagent.config.LlmProperties
-import com.example.aiagent.context.ConversationContextManager
+import com.example.aiagent.context.ContextStateService
+import com.example.aiagent.context.branch.ConversationBranch
+import com.example.aiagent.context.branch.ConversationBranchService
+import com.example.aiagent.context.strategy.ContextStrategyResolver
+import com.example.aiagent.context.strategy.ContextStrategyType
 import com.example.aiagent.llm.InvalidLlmResponseException
 import com.example.aiagent.llm.LlmClientResolver
 import com.example.aiagent.llm.LlmRequest
@@ -14,7 +18,9 @@ class ChatAgent(
     private val conversation: Conversation,
     private val conversationRepository: ConversationRepository,
     private val properties: LlmProperties,
-    private val conversationContextManager: ConversationContextManager,
+    private val contextStrategyResolver: ContextStrategyResolver,
+    private val contextStateService: ContextStateService,
+    private val branchService: ConversationBranchService,
 ) : Agent {
 
     @Synchronized
@@ -38,11 +44,13 @@ class ChatAgent(
         val previousTokenUsage = conversation.tokenUsage()
         val previousSummary = conversation.summary()
         val userMessage = ChatMessage(Role.USER, content)
+        val contextStrategy = contextStrategyResolver.resolve(request.contextStrategy)
+        val contextPlan = contextStrategy.buildContext(conversation)
         val llmRequest = LlmRequest(
             model = model,
             messages = buildList {
                 add(ChatMessage(Role.SYSTEM, properties.systemPrompt.trim()))
-                addAll(conversationContextManager.contextMessages(conversation))
+                addAll(contextPlan.contextMessages)
                 add(userMessage)
             },
         )
@@ -71,7 +79,7 @@ class ChatAgent(
             conversation.restore(previousMessages, previousTokenUsage, previousSummary)
             throw exception
         }
-        conversationContextManager.compressIfNeeded(conversation)
+        contextStrategy.afterSuccessfulExchange(userMessage, assistantMessage)
 
         return AgentResponse(
             provider = request.provider,
@@ -101,9 +109,24 @@ class ChatAgent(
             )
         }
 
+    override fun contextStrategies(): List<ContextStrategyType> =
+        contextStrategyResolver.availableTypes()
+
+    override fun branches(): List<ConversationBranch> = branchService.branches()
+
+    @Synchronized
+    override fun createBranch(): ConversationBranch =
+        branchService.createBranch(conversation.messages())
+
+    @Synchronized
+    override fun activateBranch(branchId: Long): AgentState = AgentState(
+        messages = branchService.activateBranch(branchId, conversation.messages()),
+        conversationUsage = conversation.tokenUsage(),
+    )
+
     @Synchronized
     override fun reset() {
-        conversationRepository.clear()
+        contextStateService.reset()
         conversation.clear()
     }
 

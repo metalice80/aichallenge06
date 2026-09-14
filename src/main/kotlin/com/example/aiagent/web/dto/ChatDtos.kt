@@ -5,6 +5,8 @@ import com.example.aiagent.agent.AgentState
 import com.example.aiagent.agent.ChatAgent
 import com.example.aiagent.agent.ChatMessage
 import com.example.aiagent.agent.ConversationTokenUsage
+import com.example.aiagent.context.branch.ConversationBranch
+import com.example.aiagent.context.strategy.ContextStrategyType
 import com.example.aiagent.agent.LlmProviderOption
 import com.example.aiagent.agent.Role
 import com.example.aiagent.llm.LlmProvider
@@ -26,6 +28,7 @@ data class ChatRequest(
         message = "Название модели не должно превышать ${ChatAgent.MAX_MODEL_LENGTH} символов.",
     )
     val model: String,
+    val contextStrategy: ContextStrategyType = ContextStrategyType.SLIDING_WINDOW,
 )
 
 data class TokenUsageResponse(
@@ -87,6 +90,34 @@ data class LlmProviderOptionResponse(
             provider = option.provider,
             displayName = option.displayName,
             defaultModel = option.defaultModel,
+        )
+    }
+}
+
+data class ContextStrategyOptionResponse(
+    val type: ContextStrategyType,
+    val displayName: String,
+) {
+    companion object {
+        fun from(type: ContextStrategyType) =
+            ContextStrategyOptionResponse(type, type.displayName)
+    }
+}
+
+data class ConversationBranchResponse(
+    val id: Long,
+    val name: String,
+    val parentBranchId: Long?,
+    val checkpointMessageCount: Int,
+    val active: Boolean,
+) {
+    companion object {
+        fun from(branch: ConversationBranch) = ConversationBranchResponse(
+            id = branch.id,
+            name = branch.name,
+            parentBranchId = branch.parentBranchId,
+            checkpointMessageCount = branch.checkpointMessageCount,
+            active = branch.active,
         )
     }
 }

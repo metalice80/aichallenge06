@@ -8,6 +8,8 @@ import com.example.aiagent.agent.ChatMessage
 import com.example.aiagent.agent.ConversationTokenUsage
 import com.example.aiagent.agent.LlmProviderOption
 import com.example.aiagent.agent.Role
+import com.example.aiagent.context.branch.ConversationBranch
+import com.example.aiagent.context.strategy.ContextStrategyType
 import com.example.aiagent.llm.LlmProvider
 import com.example.aiagent.llm.TokenUsage
 import com.example.aiagent.web.dto.ChatRequest
@@ -28,7 +30,12 @@ class ChatControllerTest {
 
     @Test
     fun `chat delegates to agent and maps response`() {
-        val request = AgentRequest("Привет", LlmProvider.OPENROUTER, "openai/gpt-test")
+        val request = AgentRequest(
+            "Привет",
+            LlmProvider.OPENROUTER,
+            "openai/gpt-test",
+            ContextStrategyType.STICKY_FACTS,
+        )
         every { agent.sendMessage(request) } returns AgentResponse(
             provider = LlmProvider.OPENROUTER,
             content = "Здравствуйте",
@@ -39,9 +46,14 @@ class ChatControllerTest {
         )
 
         val response = controller.chat(
-            ChatRequest("Привет", LlmProvider.OPENROUTER, "openai/gpt-test"),
-        )
+            ChatRequest(
+                "Привет",
+                LlmProvider.OPENROUTER,
+                "openai/gpt-test",
+                ContextStrategyType.STICKY_FACTS,
+            ),
 
+        )
         assertEquals(LlmProvider.OPENROUTER, response.provider)
         assertEquals("Здравствуйте", response.content)
         assertEquals("test-model", response.model)
@@ -100,6 +112,44 @@ class ChatControllerTest {
 
         assertEquals(listOf(LlmProvider.OPENAI, LlmProvider.OPENROUTER), response.map { it.provider })
         assertEquals(listOf("gpt-default", "openai/router-default"), response.map { it.defaultModel })
+    }
+
+    @Test
+    fun `context strategies expose all selectable implementations`() {
+        every { agent.contextStrategies() } returns ContextStrategyType.entries
+
+        val response = controller.contextStrategies()
+
+        assertEquals(ContextStrategyType.entries, response.map { it.type })
+        assertEquals(listOf("Sliding Window", "Sticky Facts", "Branching"), response.map { it.displayName })
+    }
+
+    @Test
+    fun `branch endpoints expose parent checkpoint create and activation state`() {
+        val main = ConversationBranch(1, "Main", null, 0, active = true)
+        val child = ConversationBranch(2, "Branch 1", 1, 4, active = true)
+        every { agent.branches() } returns listOf(main)
+        every { agent.createBranch() } returns child
+        every { agent.activateBranch(2) } returns AgentState(
+            messages = listOf(
+                ChatMessage(Role.SYSTEM, "Internal"),
+                ChatMessage(Role.USER, "Branch question"),
+                ChatMessage(Role.ASSISTANT, "Branch answer"),
+            ),
+            conversationUsage = ConversationTokenUsage(10, 5, 15),
+        )
+
+        val listed = controller.branches()
+        val created = controller.createBranch()
+        val activated = controller.activateBranch(2)
+
+        assertEquals(1, listed.single().id)
+        assertEquals(1, created.parentBranchId)
+        assertEquals(4, created.checkpointMessageCount)
+        assertEquals(listOf("Branch question", "Branch answer"), activated.messages.map { it.content })
+        assertEquals(ConversationTokenUsageResponse(10, 5, 15), activated.conversationUsage)
+        verify(exactly = 1) { agent.createBranch() }
+        verify(exactly = 1) { agent.activateBranch(2) }
     }
 
     @Test

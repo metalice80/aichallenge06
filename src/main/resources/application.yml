@@ -19,6 +19,21 @@ llm:
     Учитывай предыдущие сообщения пользователя в текущем диалоге.
 
 context:
+  strategies:
+    sliding-window:
+      size: ${CONTEXT_SLIDING_WINDOW_SIZE:2}
+    sticky-facts:
+      window-size: ${CONTEXT_STICKY_FACTS_WINDOW_SIZE:20}
+      extractor:
+        provider: ${CONTEXT_FACTS_PROVIDER:OPENAI}
+        model: ${CONTEXT_FACTS_MODEL:gpt-4o-mini}
+        system-prompt: |-
+          Проанализируй новое сообщение пользователя.
+          Выделяй только долгоживущие факты: цели, ограничения,
+          предпочтения, решения, договорённости и важные параметры.
+          Учитывай существующие facts и не добавляй информацию,
+          которой пользователь не сообщал.
+          Верни JSON с массивом upsert и массивом ключей delete.
   compression:
     enabled: ${CONTEXT_COMPRESSION_ENABLED:true}
     summarize-after-messages: ${CONTEXT_SUMMARIZE_AFTER_MESSAGES:4}

@@ -18,22 +18,23 @@ Spring AI, LangChain и LangChain4j не используются.
 ## Архитектура
 
 ```text
-                         ┌─► OpenAiLlmClient ─────► OpenAI
-Browser ─► Controller ─► Agent ─► LlmClientResolver
-                         └─► OpenRouterLlmClient ─► OpenRouter
-              │
-              └─► ConversationRepository ─► SQLite
+Browser ─► ChatController ─► ChatAgent ─► LlmClientResolver ─► OpenAI/OpenRouter
+                                │
+                                ├─► ContextStrategyResolver
+                                │     ├─► SlidingWindowContextStrategy
+                                │     ├─► StickyFactsContextStrategy ─► FactsExtractor
+                                │     └─► BranchingContextStrategy ─► branch graph
+                                │
+                                └─► repositories ─► SQLite
 ```
 
 - `ChatController` отвечает за REST-контракт, validation и вызов provider-neutral `Agent`.
-- `ChatAgent` зависит только от `LlmClientResolver`, `Conversation` и `ConversationRepository`; URL, API keys и HTTP headers providers ему неизвестны.
-- `DefaultLlmClientResolver` выбирает реализацию общего `LlmClient` по `LlmProvider`.
-- `OpenAiLlmClient` и `OpenRouterLlmClient` — отдельные infrastructure clients для OpenAI-compatible Chat Completions API.
-- `Conversation` остаётся provider-neutral: provider и model можно менять между сообщениями без потери контекста.
-- `SqliteConversationRepository` атомарно сохраняет завершённые пары `USER + ASSISTANT` и usage каждого успешного LLM-вызова.
-- При ошибке LLM память и SQLite не изменяются. При ошибке сохранения in-memory messages и накопленная статистика откатываются.
-
-Текущая учебная версия обслуживает один общий активный диалог. История и накопленная статистика токенов переживают перезапуск приложения.
+- `ChatAgent` не знает URL, API keys или HTTP headers providers. Для каждого запроса он независимо выбирает `LlmClient` и `ContextStrategy`.
+- `DefaultLlmClientResolver` выбирает OpenAI/OpenRouter client по `LlmProvider`; `DefaultContextStrategyResolver` выбирает одну из трёх context strategies по `ContextStrategyType`.
+- Strategy возвращает только сообщения контекста для основного LLM-вызова. Новый `USER` message и общий system prompt добавляет `ChatAgent`.
+- Полная хронологическая история и provider-reported token usage сохраняются независимо от выбранной strategy. Переключение strategy не удаляет facts, branches, messages или statistics.
+- `SqliteConversationRepository` атомарно сохраняет завершённые пары `USER + ASSISTANT` и usage каждого успешного основного LLM-вызова.
+- При ошибке основного LLM память и SQLite не изменяются. При ошибке сохранения in-memory messages и накопленная статистика откатываются.
 
 ## Настройка
 
@@ -63,6 +64,10 @@ export OPENROUTER_MODEL="openai/gpt-4o-mini"
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | базовый URL OpenRouter |
 | `LLM_CONNECT_TIMEOUT` | `10s` | timeout соединения обоих clients |
 | `LLM_REQUEST_TIMEOUT` | `60s` | timeout запроса обоих clients |
+| `CONTEXT_SLIDING_WINDOW_SIZE` | `2` | количество existing messages в Sliding Window |
+| `CONTEXT_STICKY_FACTS_WINDOW_SIZE` | `20` | количество recent messages рядом с Sticky Facts |
+| `CONTEXT_FACTS_PROVIDER` | `OPENAI` | отдельный provider facts extractor |
+| `CONTEXT_FACTS_MODEL` | `gpt-4o-mini` | отдельная model facts extractor |
 | `AGENT_DB_PATH` | `./data/agent.db` | путь к SQLite database |
 
 API keys не включаются в frontend, REST responses или логи. System prompt находится в `src/main/resources/application.yml`.
@@ -93,36 +98,64 @@ llm:
 
 Порядок сохраняется. `enabled: false` передаётся provider без удаления элемента. При отсутствии настройки или при `plugins: []` поле `plugins` не добавляется в request. Plugin IDs не ограничены списком в приложении; пустой `id` останавливает запуск из-за ошибки configuration validation. OpenAI request не содержит OpenRouter plugins.
 
-### Rolling Context Compression
+### Context strategies
 
-Rolling Summary ограничивает контекст основной модели, не удаляя исходную историю. До первого порога основная LLM получает все сообщения. После compression она получает последнее summary как дополнительное `SYSTEM`-сообщение и только сообщения после persisted cursor. UI и SQLite по-прежнему содержат полную историю.
+UI позволяет выбрать ровно одну strategy для каждого основного запроса:
+
+- `SLIDING_WINDOW` — последние $N$ existing messages плюс новый `USER` message. При $N=4$ и шести сохранённых сообщениях модель получает Messages 3–6 и новый вопрос.
+- `STICKY_FACTS` — отдельный `SYSTEM` block с persistent facts, последние $N$ existing messages и новый `USER` message.
+- `BRANCHING` — effective history активной ветки и новый `USER` message. Branch controls появляются в UI только для этой strategy.
 
 ```yaml
 context:
-  compression:
-    enabled: true
-    summarize-after-messages: 20
-    summarize-every-messages: 10
-    provider: OPENAI
-    model: gpt-5-nano
-    system-prompt: |-
-      Сожми предыдущий диалог в компактное самостоятельное summary.
-      Сохрани важные факты, решения, ограничения и открытые вопросы.
+  strategies:
+    sliding-window:
+      size: 2
+    sticky-facts:
+      window-size: 20
+      extractor:
+        provider: OPENAI
+        model: gpt-4o-mini
+        system-prompt: |-
+          Проанализируй новое сообщение пользователя...
 ```
 
-При 20 сообщениях первые 10 входят в initial summary, а последние 10 остаются без изменений. После накопления следующих 10 сообщений summarizer получает только existing summary и Messages 11–20; результат полностью заменяет предыдущее summary. Main provider/model выбираются пользователем, summary provider/model задаются этой конфигурацией и используют тот же `LlmClientResolver`.
+Оба window size валидируются при запуске и должны быть больше нуля. Main provider/model выбираются в UI. Facts extractor имеет независимые provider/model/system prompt, но выбирает client через тот же `LlmClientResolver`.
 
-Summary и `summarized_message_count` сохраняются в SQLite и восстанавливаются после restart. Ошибка summarizer не удаляет историю и не продвигает cursor. `enabled: false` сохраняет прежнее поведение с полной Conversation без вызова summarizer.
+После каждого успешного сообщения со `STICKY_FACTS` extractor получает existing facts и новое пользовательское сообщение. Он возвращает:
+
+```json
+{"upsert":[{"key":"language","value":"Kotlin"}],"delete":["old-key"]}
+```
+
+Upsert заменяет value по стабильному key, delete удаляет key. Facts сохраняются в SQLite и входят уже в следующий основной запрос. Ошибка сети или невалидный JSON extractor не отменяет успешный основной ответ, не меняет существующие facts и не удаляет историю.
+
+Branching всегда начинается с `Main`. Новая ветка получает `parentBranchId` активной ветки и `checkpointMessageCount`, равный длине effective parent history в момент создания, после чего автоматически становится активной. В SQLite дочерняя ветка хранит только собственные messages:
+
+```text
+Main:     A ─ B ─ C ─ D
+                    ├─ Branch 1: E ─ F
+                    └─ Branch 2: G ─ H
+```
+
+Effective history `Branch 1` равна `A…D + E…F`, а `Branch 2` — `A…D + G…H`; сообщения одной ветки не попадают в контекст другой. Parent, checkpoint, active branch и собственные messages переживают restart.
+
+### Rolling Context Compression
+
+Существующая реализация Rolling Summary, её configuration properties и persisted `conversation_summary` сохранены отдельно. Она намеренно не зарегистрирована как одна из трёх selectable strategies и не добавляется к их LLM contexts: Sliding Window, Sticky Facts и Branching никогда не смешиваются с summary/cursor.
 
 ## Persistent context
 
-При первом запуске приложение создаёт родительскую директорию, SQLite-файл и три таблицы:
+При первом запуске приложение создаёт родительскую директорию, SQLite-файл и шесть таблиц:
 
-- `chat_message` — полная история сообщений с `id`, `role`, `content` и `created_at`;
-- `llm_request_usage` — usage каждого успешного пользовательского запроса с provider, model, input/output/total tokens, response time и timestamp;
-- `conversation_summary` — последнее rolling summary и `summarized_message_count`, атомарно определяющий compression cursor.
+- `chat_message` — полная хронологическая история сообщений;
+- `llm_request_usage` — usage каждого успешного основного запроса;
+- `conversation_summary` — сохранённое состояние отдельной legacy Rolling Summary реализации;
+- `conversation_fact` — Sticky Facts с уникальным key, value и временем обновления;
+- `conversation_branch` — branch graph, parent, checkpoint и active marker;
+- `branch_message` — только собственные сообщения каждой ветки и их порядок.
 
-System prompt в базу не записывается и добавляется Agent при каждом LLM-запросе. Накопленные totals вычисляются как суммы persisted usage, поэтому смена provider или model не сбрасывает статистику.
+System prompt в базу не записывается и добавляется Agent при каждом LLM-запросе. Накопленные totals вычисляются как суммы persisted usage: смена provider, model, strategy или branch не сбрасывает и не дублирует статистику.
 
 Чтобы проверить восстановление:
 
@@ -137,7 +170,7 @@ System prompt в базу не записывается и добавляетс�
 export AGENT_DB_PATH=\"./data/local-agent.db\"
 ```
 
-Очищать SQLite-файл вручную не требуется: кнопка `Сбросить чат` удаляет сообщения, usage, rolling summary и compression cursor из памяти и persistent storage.
+Очищать SQLite-файл вручную не требуется: кнопка `Сбросить чат` удаляет messages, usage, rolling summary, Sticky Facts и весь branch graph, затем создаёт пустую активную ветку `Main`.
 
 ## Запуск
 
@@ -158,6 +191,17 @@ GET /api/chat/providers
 ```
 
 Возвращает `OPENAI`, `OPENROUTER` и настроенные default models. UI использует endpoint для selector и позволяет вручную изменить model id.
+
+### Context strategies и branches
+
+```http
+GET /api/chat/context-strategies
+GET /api/chat/branches
+POST /api/chat/branches
+POST /api/chat/branches/{branchId}/activate
+```
+
+Первый endpoint возвращает `SLIDING_WINDOW`, `STICKY_FACTS`, `BRANCHING`. Branch list содержит `id`, `name`, `parentBranchId`, `checkpointMessageCount`, `active`. Создание использует checkpoint текущей активной ветки и возвращает новый active child. Activation сохраняет active marker и возвращает effective branch messages вместе с общей token usage.
 
 ### История диалога
 
@@ -181,7 +225,7 @@ GET /api/chat/state
 POST /api/chat
 Content-Type: application/json
 
-{"message":"Что такое JVM?","provider":"OPENAI","model":"gpt-4.1-mini"}
+{"message":"Что такое JVM?","provider":"OPENAI","model":"gpt-4.1-mini","contextStrategy":"SLIDING_WINDOW"}
 ```
 
 OpenRouter использует тот же контракт с provider `OPENROUTER` и model id формата `provider/model`, например `anthropic/claude-...`.
@@ -215,7 +259,7 @@ OpenRouter использует тот же контракт с provider `OPENRO
 POST /api/chat/reset
 ```
 
-Ответ: `204 No Content`. Reset очищает in-memory `Conversation`, `chat_message` и `llm_request_usage`; после перезапуска старые messages и totals не возвращаются. Следующий запрос начинает новый контекст и новую статистику с нуля.
+Ответ: `204 No Content`. Reset очищает in-memory `Conversation`, все persisted messages/usage/summary/facts/branches и создаёт свежую пустую `Main`; после restart старое состояние не возвращается.
 
 ## Ошибки
 
@@ -234,4 +278,4 @@ API возвращает JSON вида:
 ./gradlew build
 ```
 
-Unit-тесты проверяют выбор OpenAI/OpenRouter, plugins, provider-reported usage, rolling thresholds, initial/updated summary, fallback после ошибок и независимые main/summary provider и model. HTTP client tests без реальных API keys проверяют Authorization headers, endpoints, request body, messages и usage mapping обоих providers. SQLite integration tests проверяют restart, per-request usage, backward-compatible schema, summary/cursor update и полный persisted reset.
+Unit-тесты проверяют выбор OpenAI/OpenRouter, plugins, provider-reported usage, resolver, точные Sliding/Sticky/Branching contexts, facts extractor и независимые provider/model. SQLite integration tests проверяют restart, upsert/delete facts, parent checkpoints, две расходящиеся ветки без копирования inherited messages, token usage и полный reset.
