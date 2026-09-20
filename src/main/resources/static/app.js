@@ -8,6 +8,19 @@ const contextStrategySelect = document.querySelector('#context-strategy-select')
 const taskSelect = document.querySelector('#task-select');
 const createTaskButton = document.querySelector('#create-task-button');
 const completeTaskButton = document.querySelector('#complete-task-button');
+const profileSelect = document.querySelector('#profile-select');
+const createProfileButton = document.querySelector('#create-profile-button');
+const editProfileButton = document.querySelector('#edit-profile-button');
+const profileDialog = document.querySelector('#profile-dialog');
+const profileForm = document.querySelector('#profile-form');
+const profileDialogTitle = document.querySelector('#profile-dialog-title');
+const profileNameInput = document.querySelector('#profile-name-input');
+const profileLanguageSelect = document.querySelector('#profile-language-select');
+const profileExpertiseSelect = document.querySelector('#profile-expertise-select');
+const profileStyleSelect = document.querySelector('#profile-style-select');
+const profileFormatSelect = document.querySelector('#profile-format-select');
+const profileCustomInstructions = document.querySelector('#profile-custom-instructions');
+const cancelProfileButton = document.querySelector('#cancel-profile-button');
 const branchControls = document.querySelector('#branch-controls');
 const branchSelect = document.querySelector('#branch-select');
 const createBranchButton = document.querySelector('#create-branch-button');
@@ -27,6 +40,8 @@ const effectiveContext = document.querySelector('#effective-context');
 
 let busy = false;
 let activeTaskStatus = 'ACTIVE';
+let profiles = [];
+let editingProfileId = null;
 
 chatForm.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -178,6 +193,71 @@ taskSelect.addEventListener('change', async () => {
     }, 'Не удалось переключить задачу.');
 });
 
+profileSelect.addEventListener('change', async () => {
+    if (busy || !profileSelect.value) return;
+    await runAction(async () => {
+        const response = await fetch(
+            `/api/chat/profiles/${encodeURIComponent(profileSelect.value)}/activate`,
+            { method: 'POST' },
+        );
+        const payload = await readJson(response);
+        if (!response.ok) {
+            throw new Error(payload?.message || 'Не удалось переключить профиль.');
+        }
+        await loadProfiles();
+        await loadMemory();
+    }, 'Не удалось переключить профиль.');
+});
+
+createProfileButton.addEventListener('click', () => {
+    if (!busy) openProfileDialog(null);
+});
+
+editProfileButton.addEventListener('click', () => {
+    if (busy) return;
+    const profile = profiles.find((item) => String(item.id) === profileSelect.value);
+    if (profile) openProfileDialog(profile);
+});
+
+cancelProfileButton.addEventListener('click', () => profileDialog.close());
+
+profileForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (busy) return;
+    const body = {
+        name: profileNameInput.value.trim(),
+        responseLanguage: profileLanguageSelect.value,
+        expertiseLevel: profileExpertiseSelect.value,
+        responseStyle: profileStyleSelect.value,
+        responseFormat: profileFormatSelect.value,
+        customInstructions: profileCustomInstructions.value.trim(),
+    };
+    if (!body.name) {
+        showError('Введите название профиля.');
+        profileNameInput.focus();
+        return;
+    }
+    const profileId = editingProfileId;
+    await runAction(async () => {
+        const response = await fetch(
+            profileId === null
+                ? '/api/chat/profiles'
+                : `/api/chat/profiles/${encodeURIComponent(profileId)}`,
+            {
+                method: profileId === null ? 'POST' : 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            },
+        );
+        const payload = await readJson(response);
+        if (!response.ok) {
+            throw new Error(payload?.message || 'Не удалось сохранить профиль.');
+        }
+        profileDialog.close();
+        await loadProfiles();
+    }, 'Не удалось сохранить профиль.');
+});
+
 messageInput.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
         event.preventDefault();
@@ -252,6 +332,7 @@ async function initialize() {
         await loadProviders();
         await loadContextStrategies();
         await loadTasks();
+        await loadProfiles();
         await loadState();
         await loadBranches();
         await loadMemory();
@@ -337,6 +418,56 @@ async function loadTasks() {
     taskSelect.value = selected.value;
     activeTaskStatus = selected.dataset.status || 'ACTIVE';
     updateTaskControls();
+}
+
+async function loadProfiles() {
+    const response = await fetch('/api/chat/profiles');
+    const payload = await readJson(response);
+    if (!response.ok || !Array.isArray(payload)) {
+        throw new Error(payload?.message || 'Не удалось загрузить профили.');
+    }
+    profiles = payload.filter((profile) =>
+        typeof profile?.id === 'number' && typeof profile?.name === 'string',
+    );
+    profileSelect.replaceChildren();
+    if (!profiles.length) {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = 'Профиль не создан';
+        profileSelect.append(option);
+    } else {
+        profiles.forEach((profile) => {
+            const option = document.createElement('option');
+            option.value = String(profile.id);
+            option.textContent = profile.name;
+            option.dataset.active = String(profile.active === true);
+            profileSelect.append(option);
+        });
+        const active = profiles.find((profile) => profile.active === true);
+        if (active) {
+            profileSelect.value = String(active.id);
+        } else {
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = 'Активный профиль не выбран';
+            profileSelect.prepend(option);
+            profileSelect.value = '';
+        }
+    }
+    editProfileButton.disabled = busy || !profileSelect.value;
+}
+
+function openProfileDialog(profile) {
+    editingProfileId = profile?.id ?? null;
+    profileDialogTitle.textContent = profile ? 'Редактировать профиль' : 'Новый профиль';
+    profileNameInput.value = profile?.name || '';
+    profileLanguageSelect.value = profile?.responseLanguage || 'RUSSIAN';
+    profileExpertiseSelect.value = profile?.expertiseLevel || 'INTERMEDIATE';
+    profileStyleSelect.value = profile?.responseStyle || 'CONCISE';
+    profileFormatSelect.value = profile?.responseFormat || 'STRUCTURED';
+    profileCustomInstructions.value = profile?.customInstructions || '';
+    profileDialog.showModal();
+    profileNameInput.focus();
 }
 
 async function loadBranches() {
@@ -494,6 +625,8 @@ function renderEffectiveContext(context) {
     effectiveContext.append(diagnosticText(context.systemPrompt || ''));
     effectiveContext.append(diagnosticSection('LONG-TERM MEMORY'));
     appendContextEntries(effectiveContext, context.longTermMemory);
+    effectiveContext.append(diagnosticSection('USER PROFILE'));
+    appendContextProfile(effectiveContext, context.userProfile);
     effectiveContext.append(diagnosticSection('WORKING MEMORY'));
     appendContextEntries(effectiveContext, context.workingMemory);
     effectiveContext.append(diagnosticSection(`EFFECTIVE SHORT-TERM · ${context.strategy}`));
@@ -504,6 +637,21 @@ function renderEffectiveContext(context) {
     });
     effectiveContext.append(diagnosticSection('CURRENT USER MESSAGE'));
     effectiveContext.append(diagnosticRow('USER', context.currentUserMessage?.content || ''));
+}
+
+function appendContextProfile(container, profile) {
+    if (!profile) {
+        container.append(diagnosticEmpty('(no active profile)'));
+        return;
+    }
+    container.append(diagnosticRow('Profile', profile.name || '—'));
+    container.append(diagnosticRow('Language', profile.responseLanguage || '—'));
+    container.append(diagnosticRow('Expertise', profile.expertiseLevel || '—'));
+    container.append(diagnosticRow('Style', profile.responseStyle || '—'));
+    container.append(diagnosticRow('Format', profile.responseFormat || '—'));
+    if (profile.customInstructions) {
+        container.append(diagnosticRow('Custom Instructions', profile.customInstructions));
+    }
 }
 
 function appendContextEntries(container, entries) {
@@ -615,6 +763,9 @@ function setBusy(value) {
     modelInput.disabled = value;
     contextStrategySelect.disabled = value;
     taskSelect.disabled = value;
+    profileSelect.disabled = value;
+    createProfileButton.disabled = value;
+    editProfileButton.disabled = value || !profileSelect.value;
     createTaskButton.disabled = value;
     branchSelect.disabled = value;
     createBranchButton.disabled = value;

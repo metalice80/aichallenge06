@@ -3,10 +3,13 @@ package com.example.aiagent.memory
 import com.example.aiagent.agent.ChatMessage
 import com.example.aiagent.agent.Role
 import com.example.aiagent.config.MemoryProperties
-import com.example.aiagent.context.strategy.ContextPlan
-import com.example.aiagent.context.strategy.ContextStrategyType
 import com.example.aiagent.task.AgentTask
 import com.example.aiagent.task.TaskStatus
+import com.example.aiagent.profile.ExpertiseLevel
+import com.example.aiagent.profile.ResponseFormat
+import com.example.aiagent.profile.ResponseLanguage
+import com.example.aiagent.profile.ResponseStyle
+import com.example.aiagent.profile.UserProfileSnapshot
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
@@ -46,37 +49,40 @@ class MemoryServiceTest {
 
         val context = service.context(task)
 
-        assertEquals(2, context.messages.size)
-        assertTrue(context.messages[0].content.contains("lowest memory priority"))
-        assertTrue(context.messages[0].content.contains("preferred_code_language = Kotlin"))
-        assertTrue(context.messages[1].content.contains("overrides Long-Term Memory"))
-        assertTrue(context.messages[1].content.contains("language = Java"))
-        assertTrue(context.messages[1].content.contains("current user message overrides"))
+        assertEquals(listOf(MemoryEntry("preferred_code_language", "Kotlin")), context.longTerm)
+        assertEquals(listOf(MemoryEntry("language", "Java")), context.working)
     }
 
     @Test
     fun `effective context persists logical sections and redacts secrets`() {
         val captured = slot<EffectiveContext>()
         every { repository.saveEffectiveContext(capture(captured)) } returns Unit
-        val memoryContext = MemoryContext(
-            longTerm = listOf(MemoryEntry("preferred_language", "Russian")),
-            working = listOf(MemoryEntry("api_key", "sk-secret123456")),
-            messages = emptyList(),
-        )
-
-        service.recordEffectiveContext(
-            task = task,
-            strategy = ContextStrategyType.SLIDING_WINDOW,
+        val context = EffectiveContext(
+            taskId = task.id,
+            strategy = com.example.aiagent.context.strategy.ContextStrategyType.SLIDING_WINDOW,
             systemPrompt = "Use Authorization: Bearer abcdefghijklmnop",
-            memoryContext = memoryContext,
-            contextPlan = ContextPlan(listOf(ChatMessage(Role.ASSISTANT, "previous"))),
+            longTermMemory = listOf(MemoryEntry("preferred_language", "Russian")),
+            userProfile = UserProfileSnapshot(
+                id = 3,
+                name = "Developer",
+                responseLanguage = ResponseLanguage.RUSSIAN,
+                expertiseLevel = ExpertiseLevel.ADVANCED,
+                responseStyle = ResponseStyle.CONCISE,
+                responseFormat = ResponseFormat.CODE_FIRST,
+                customInstructions = "token=sk-profile123456",
+            ),
+            workingMemory = listOf(MemoryEntry("api_key", "sk-secret123456")),
+            shortTerm = listOf(ChatMessage(Role.ASSISTANT, "previous")),
             currentUserMessage = ChatMessage(Role.USER, "token=sk-current123456"),
+            preparedAt = Instant.parse("2026-01-02T00:00:00Z"),
         )
 
+        service.recordEffectiveContext(context)
         assertTrue(captured.captured.systemPrompt.contains("[REDACTED]"))
         assertFalse(captured.captured.systemPrompt.contains("abcdefghijklmnop"))
         assertEquals("[REDACTED]", captured.captured.workingMemory.single().value)
         assertTrue(captured.captured.currentUserMessage.content.contains("[REDACTED]"))
+        assertTrue(captured.captured.userProfile!!.customInstructions.contains("[REDACTED]"))
         assertFalse(captured.captured.currentUserMessage.content.contains("sk-current123456"))
         assertEquals(listOf(ChatMessage(Role.ASSISTANT, "previous")), captured.captured.shortTerm)
     }

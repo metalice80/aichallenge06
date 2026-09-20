@@ -9,6 +9,7 @@ import com.example.aiagent.memory.MemoryChangeType
 import com.example.aiagent.memory.MemoryEntry
 import com.example.aiagent.memory.MemoryLayerUpdate
 import com.example.aiagent.memory.MemoryRepository
+import com.example.aiagent.profile.UserProfileSnapshot
 import com.example.aiagent.memory.MemoryUpdate
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.stereotype.Repository
@@ -63,6 +64,7 @@ class SqliteMemoryRepository(
                 strategy TEXT NOT NULL,
                 system_prompt TEXT NOT NULL,
                 long_term_memory TEXT NOT NULL,
+                user_profile TEXT,
                 working_memory TEXT NOT NULL,
                 short_term TEXT NOT NULL,
                 current_user_message TEXT NOT NULL,
@@ -70,6 +72,7 @@ class SqliteMemoryRepository(
             )
             """.trimIndent(),
         )
+        addColumnIfMissing("effective_context", "user_profile", "TEXT")
     }
 
     override fun findWorking(taskId: Long): List<MemoryEntry> = jdbcTemplate.query(
@@ -142,13 +145,14 @@ class SqliteMemoryRepository(
         jdbcTemplate.update(
             """
             INSERT INTO effective_context(
-                task_id, strategy, system_prompt, long_term_memory, working_memory,
-                short_term, current_user_message, prepared_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                task_id, strategy, system_prompt, long_term_memory, user_profile,
+                working_memory, short_term, current_user_message, prepared_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET
                 strategy = excluded.strategy,
                 system_prompt = excluded.system_prompt,
                 long_term_memory = excluded.long_term_memory,
+                user_profile = excluded.user_profile,
                 working_memory = excluded.working_memory,
                 short_term = excluded.short_term,
                 current_user_message = excluded.current_user_message,
@@ -158,6 +162,7 @@ class SqliteMemoryRepository(
             context.strategy.name,
             context.systemPrompt,
             jsonMapper.writeValueAsString(context.longTermMemory),
+            context.userProfile?.let(jsonMapper::writeValueAsString),
             jsonMapper.writeValueAsString(context.workingMemory),
             jsonMapper.writeValueAsString(context.shortTerm),
             jsonMapper.writeValueAsString(context.currentUserMessage),
@@ -176,6 +181,9 @@ class SqliteMemoryRepository(
                     resultSet.getString("long_term_memory"),
                     Array<MemoryEntry>::class.java,
                 ).toList(),
+                userProfile = resultSet.getString("user_profile")?.let { value ->
+                    jsonMapper.readValue(value, UserProfileSnapshot::class.java)
+                },
                 workingMemory = jsonMapper.readValue(
                     resultSet.getString("working_memory"),
                     Array<MemoryEntry>::class.java,
@@ -321,4 +329,13 @@ class SqliteMemoryRepository(
         )
         return update
     }
+
+    private fun addColumnIfMissing(table: String, column: String, definition: String) {
+        val columns = jdbcTemplate.queryForList("PRAGMA table_info($table)")
+            .mapNotNull { row -> row["name"]?.toString() }
+        if (column !in columns) {
+            jdbcTemplate.execute("ALTER TABLE $table ADD COLUMN $column $definition")
+        }
+    }
+
 }

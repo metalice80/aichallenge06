@@ -12,6 +12,7 @@ import com.example.aiagent.llm.LlmRequestException
 import com.example.aiagent.llm.LlmServerException
 import com.example.aiagent.llm.LlmTimeoutException
 import com.example.aiagent.llm.MissingApiKeyException
+import com.example.aiagent.profile.InvalidUserProfileException
 import com.example.aiagent.web.dto.ApiError
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpStatus
@@ -31,6 +32,10 @@ class ApiExceptionHandler {
             ?: "Некорректное сообщение."
         return error(HttpStatus.BAD_REQUEST, message)
     }
+
+    @ExceptionHandler(InvalidUserProfileException::class)
+    fun handleInvalidProfile(exception: InvalidUserProfileException): ResponseEntity<ApiError> =
+        error(HttpStatus.BAD_REQUEST, exception.message ?: "Некорректный User Profile.")
 
     @ExceptionHandler(
         HttpMessageNotReadableException::class,

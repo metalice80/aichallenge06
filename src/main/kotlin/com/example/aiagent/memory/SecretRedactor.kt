@@ -13,6 +13,8 @@ class SecretRedactor {
         }
     }
 
+    fun containsSecret(value: String): Boolean = redact(value) != value
+
     private companion object {
         val patterns = listOf(
             Regex("(?i)\\bBearer\\s+[A-Za-z0-9._~+/-]{8,}=*"),

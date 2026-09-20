@@ -2,6 +2,7 @@ package com.example.aiagent.memory
 
 import com.example.aiagent.agent.ChatMessage
 import com.example.aiagent.context.strategy.ContextStrategyType
+import com.example.aiagent.profile.UserProfileSnapshot
 import java.time.Instant
 
 data class MemoryEntry(
@@ -56,6 +57,7 @@ data class EffectiveContext(
     val strategy: ContextStrategyType,
     val systemPrompt: String,
     val longTermMemory: List<MemoryEntry>,
+    val userProfile: UserProfileSnapshot?,
     val workingMemory: List<MemoryEntry>,
     val shortTerm: List<ChatMessage>,
     val currentUserMessage: ChatMessage,

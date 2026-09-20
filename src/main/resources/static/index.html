@@ -32,6 +32,20 @@
                 Завершить задачу
             </button>
         </div>
+        <div class="profile-controls" aria-label="Активный профиль">
+            <label class="provider-field profile-selector" for="profile-select">
+                <span>Profile</span>
+                <select id="profile-select" name="profile">
+                    <option value="">Профиль не создан</option>
+                </select>
+            </label>
+            <button id="create-profile-button" class="button button-secondary" type="button">
+                + Новый профиль
+            </button>
+            <button id="edit-profile-button" class="button button-secondary" type="button" disabled>
+                Редактировать
+            </button>
+        </div>
         <div class="provider-controls" aria-label="Настройки модели">
             <label class="provider-field" for="provider-select">
                 <span>Provider</span>
@@ -181,6 +195,69 @@
             <div id="effective-context" class="effective-context">Контекст ещё не формировался.</div>
         </section>
     </aside>
+    <dialog id="profile-dialog" class="profile-dialog" aria-labelledby="profile-dialog-title">
+        <form id="profile-form" class="profile-form">
+            <div>
+                <p class="eyebrow">Явная персонализация</p>
+                <h2 id="profile-dialog-title">Новый профиль</h2>
+            </div>
+            <label class="provider-field" for="profile-name-input">
+                <span>Название</span>
+                <input id="profile-name-input" name="name" maxlength="120" required>
+            </label>
+            <div class="profile-form-grid">
+                <label class="provider-field" for="profile-language-select">
+                    <span>Язык ответа</span>
+                    <select id="profile-language-select" name="responseLanguage">
+                        <option value="RUSSIAN">Russian</option>
+                        <option value="ENGLISH">English</option>
+                    </select>
+                </label>
+                <label class="provider-field" for="profile-expertise-select">
+                    <span>Уровень знаний</span>
+                    <select id="profile-expertise-select" name="expertiseLevel">
+                        <option value="BEGINNER">Beginner</option>
+                        <option value="INTERMEDIATE">Intermediate</option>
+                        <option value="ADVANCED">Advanced</option>
+                    </select>
+                </label>
+                <label class="provider-field" for="profile-style-select">
+                    <span>Стиль ответа</span>
+                    <select id="profile-style-select" name="responseStyle">
+                        <option value="CONCISE">Concise</option>
+                        <option value="DETAILED">Detailed</option>
+                        <option value="EDUCATIONAL">Educational</option>
+                        <option value="TECHNICAL">Technical</option>
+                    </select>
+                </label>
+                <label class="provider-field" for="profile-format-select">
+                    <span>Формат ответа</span>
+                    <select id="profile-format-select" name="responseFormat">
+                        <option value="TEXT">Text</option>
+                        <option value="STRUCTURED">Structured</option>
+                        <option value="CODE_FIRST">Code-first</option>
+                        <option value="STEP_BY_STEP">Step-by-step</option>
+                    </select>
+                </label>
+            </div>
+            <label class="provider-field" for="profile-custom-instructions">
+                <span>Custom instructions</span>
+                <textarea
+                    id="profile-custom-instructions"
+                    name="customInstructions"
+                    rows="6"
+                    maxlength="8000"
+                    placeholder="Например: примеры кода желательно писать на Kotlin."
+                ></textarea>
+            </label>
+            <p class="input-hint">Не сохраняйте в профиле API keys, credentials или другие секреты.</p>
+            <div class="profile-form-actions">
+                <button id="cancel-profile-button" class="button button-secondary" type="button">Отмена</button>
+                <button class="button button-primary" type="submit">Сохранить</button>
+            </div>
+        </form>
+    </dialog>
+
 </main>
 <script src="/app.js" defer></script>
 </body>

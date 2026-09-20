@@ -5,6 +5,7 @@ import com.example.aiagent.config.ContextStrategiesProperties
 import com.example.aiagent.config.LlmProperties
 import com.example.aiagent.config.SlidingWindowStrategyProperties
 import com.example.aiagent.context.ContextStateService
+import com.example.aiagent.context.EffectiveContextBuilder
 import com.example.aiagent.context.branch.ConversationBranchService
 import com.example.aiagent.context.strategy.ContextPlan
 import com.example.aiagent.context.strategy.ContextStrategy
@@ -19,15 +20,25 @@ import com.example.aiagent.llm.LlmRequest
 import com.example.aiagent.llm.LlmResponse
 import com.example.aiagent.llm.TokenUsage
 import com.example.aiagent.memory.MemoryContext
+import com.example.aiagent.memory.EffectiveContext
 import com.example.aiagent.memory.MemoryService
 import com.example.aiagent.memory.MemoryEntry
+import com.example.aiagent.memory.SecretRedactor
 import com.example.aiagent.persistence.ConversationRepository
+import com.example.aiagent.profile.ExpertiseLevel
+import com.example.aiagent.profile.ResponseFormat
+import com.example.aiagent.profile.ResponseLanguage
+import com.example.aiagent.profile.ResponseStyle
+import com.example.aiagent.profile.UserProfile
+import com.example.aiagent.profile.UserProfileService
 import com.example.aiagent.task.AgentTask
 import com.example.aiagent.task.TaskRepository
 import com.example.aiagent.task.TaskService
 import com.example.aiagent.task.TaskStatus
 import io.mockk.every
+import io.mockk.just
 import io.mockk.mockk
+import io.mockk.runs
 import io.mockk.slot
 import io.mockk.verify
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -71,18 +82,23 @@ class ChatAgentTest {
         every { activeTask() } returns activeTask
     }
     private val memoryService = mockk<MemoryService>(relaxed = true) {
-        every { context(activeTask) } returns MemoryContext(emptyList(), emptyList(), emptyList())
+        every { context(activeTask) } returns MemoryContext(emptyList(), emptyList())
+    }
+    private val effectiveContextBuilder = EffectiveContextBuilder(properties, SecretRedactor())
+    private val userProfileService = mockk<UserProfileService> {
+        every { activeProfile() } returns null
     }
     private val agent = ChatAgent(
-        resolver,
-        conversation,
-        conversationRepository,
-        properties,
-        contextStrategyResolver,
-        contextStateService,
-        branchService,
-        taskService,
-        memoryService,
+        llmClientResolver = resolver,
+        conversation = conversation,
+        conversationRepository = conversationRepository,
+        contextStrategyResolver = contextStrategyResolver,
+        contextStateService = contextStateService,
+        branchService = branchService,
+        taskService = taskService,
+        memoryService = memoryService,
+        effectiveContextBuilder = effectiveContextBuilder,
+        userProfileService = userProfileService,
     )
 
     @Test
@@ -266,15 +282,16 @@ class ChatAgentTest {
         }
         val restoredConversation = AgentConfiguration().conversation(loadingRepository, taskRepository)
         val restoredAgent = ChatAgent(
-            resolver,
-            restoredConversation,
-            loadingRepository,
-            properties,
-            contextStrategyResolver,
-            contextStateService,
-            branchService,
-            taskService,
-            memoryService,
+            llmClientResolver = resolver,
+            conversation = restoredConversation,
+            conversationRepository = loadingRepository,
+            contextStrategyResolver = contextStrategyResolver,
+            contextStateService = contextStateService,
+            branchService = branchService,
+            taskService = taskService,
+            memoryService = memoryService,
+            effectiveContextBuilder = effectiveContextBuilder,
+            userProfileService = userProfileService,
         )
         val request = slot<LlmRequest>()
         every { openRouterClient.chat(capture(request)) } returns response("Вы Алексей", "openai/gpt-test")
@@ -335,15 +352,16 @@ class ChatAgentTest {
             every { resolve(ContextStrategyType.STICKY_FACTS) } returns selectedStrategy
         }
         val selectedAgent = ChatAgent(
-            resolver,
-            strategyConversation,
-            conversationRepository,
-            properties,
-            selectedResolver,
-            contextStateService,
-            branchService,
-            taskService,
-            memoryService,
+            llmClientResolver = resolver,
+            conversation = strategyConversation,
+            conversationRepository = conversationRepository,
+            contextStrategyResolver = selectedResolver,
+            contextStateService = contextStateService,
+            branchService = branchService,
+            taskService = taskService,
+            memoryService = memoryService,
+            effectiveContextBuilder = effectiveContextBuilder,
+            userProfileService = userProfileService,
         )
         val request = slot<LlmRequest>()
         every { openRouterClient.chat(capture(request)) } returns response("Answer")
@@ -393,15 +411,16 @@ class ChatAgentTest {
             every { resolve(ContextStrategyType.STICKY_FACTS) } returns sticky
         }
         val switchingAgent = ChatAgent(
-            resolver,
-            switchingConversation,
-            conversationRepository,
-            properties,
-            switchingResolver,
-            contextStateService,
-            branchService,
-            taskService,
-            memoryService,
+            llmClientResolver = resolver,
+            conversation = switchingConversation,
+            conversationRepository = conversationRepository,
+            contextStrategyResolver = switchingResolver,
+            contextStateService = contextStateService,
+            branchService = branchService,
+            taskService = taskService,
+            memoryService = memoryService,
+            effectiveContextBuilder = effectiveContextBuilder,
+            userProfileService = userProfileService,
         )
         val requests = mutableListOf<LlmRequest>()
         every { openAiClient.chat(capture(requests)) } returnsMany listOf(
@@ -435,10 +454,6 @@ class ChatAgentTest {
         every { memoryService.context(activeTask) } returns MemoryContext(
             longTerm = listOf(MemoryEntry("preferred_code_language", "Kotlin")),
             working = listOf(MemoryEntry("language", "Java")),
-            messages = listOf(
-                ChatMessage(Role.SYSTEM, "LONG-TERM: preferred_code_language = Kotlin"),
-                ChatMessage(Role.SYSTEM, "WORKING: language = Java"),
-            ),
         )
         conversation.addAll(
             listOf(
@@ -451,16 +466,18 @@ class ChatAgentTest {
 
         agent.sendMessage(agentRequest("Use Python for this answer"))
 
+        assertEquals("System instruction", request.captured.messages[0].content)
+        assertTrue(request.captured.messages[1].content.contains("preferred_code_language = Kotlin"))
+        assertTrue(request.captured.messages[1].content.contains("Explicit User Profile"))
+        assertTrue(request.captured.messages[2].content.contains("Task \"Main Task\""))
+        assertTrue(request.captured.messages[2].content.contains("language = Java"))
         assertEquals(
             listOf(
-                ChatMessage(Role.SYSTEM, "System instruction"),
-                ChatMessage(Role.SYSTEM, "LONG-TERM: preferred_code_language = Kotlin"),
-                ChatMessage(Role.SYSTEM, "WORKING: language = Java"),
                 ChatMessage(Role.USER, "Old question"),
                 ChatMessage(Role.ASSISTANT, "Old answer"),
                 ChatMessage(Role.USER, "Use Python for this answer"),
             ),
-            request.captured.messages,
+            request.captured.messages.takeLast(3),
         )
     }
 
@@ -479,21 +496,18 @@ class ChatAgentTest {
         every { memoryService.context(activeTask) } returns MemoryContext(
             longTerm = listOf(MemoryEntry("answer_language", "Russian")),
             working = listOf(MemoryEntry("database", "PostgreSQL")),
-            messages = listOf(
-                ChatMessage(Role.SYSTEM, "LONG-TERM: answer_language = Russian"),
-                ChatMessage(Role.SYSTEM, "WORKING: database = PostgreSQL"),
-            ),
         )
         val branchAgent = ChatAgent(
-            resolver,
-            branchConversation,
-            conversationRepository,
-            properties,
-            branchingResolver,
-            contextStateService,
-            branchService,
-            taskService,
-            memoryService,
+            llmClientResolver = resolver,
+            conversation = branchConversation,
+            conversationRepository = conversationRepository,
+            contextStrategyResolver = branchingResolver,
+            contextStateService = contextStateService,
+            branchService = branchService,
+            taskService = taskService,
+            memoryService = memoryService,
+            effectiveContextBuilder = effectiveContextBuilder,
+            userProfileService = userProfileService,
         )
         val request = slot<LlmRequest>()
         every { openAiClient.chat(capture(request)) } returns response("Branch answer")
@@ -502,17 +516,54 @@ class ChatAgentTest {
             agentRequest("Branch question", contextStrategy = ContextStrategyType.BRANCHING),
         )
 
+        assertEquals("System instruction", request.captured.messages[0].content)
+        assertTrue(request.captured.messages[1].content.contains("answer_language = Russian"))
+        assertTrue(request.captured.messages[2].content.contains("database = PostgreSQL"))
         assertEquals(
             listOf(
-                ChatMessage(Role.SYSTEM, "System instruction"),
-                ChatMessage(Role.SYSTEM, "LONG-TERM: answer_language = Russian"),
-                ChatMessage(Role.SYSTEM, "WORKING: database = PostgreSQL"),
                 ChatMessage(Role.USER, "Active branch history"),
                 ChatMessage(Role.USER, "Branch question"),
             ),
-            request.captured.messages,
+            request.captured.messages.takeLast(2),
         )
     }
+
+    @Test
+    fun `switching active Profile changes next context without clearing Conversation`() {
+        val developer = profile(
+            id = 1,
+            name = "Developer",
+            expertise = ExpertiseLevel.ADVANCED,
+            style = ResponseStyle.CONCISE,
+            format = ResponseFormat.CODE_FIRST,
+        )
+        val student = profile(
+            id = 2,
+            name = "Student",
+            expertise = ExpertiseLevel.BEGINNER,
+            style = ResponseStyle.EDUCATIONAL,
+            format = ResponseFormat.STEP_BY_STEP,
+        )
+        every { userProfileService.activeProfile() } returnsMany listOf(developer, student)
+        val requests = mutableListOf<LlmRequest>()
+        val diagnostics = mutableListOf<EffectiveContext>()
+        every { openAiClient.chat(capture(requests)) } returnsMany listOf(
+            response("Developer answer"),
+            response("Student answer"),
+        )
+        every { memoryService.recordEffectiveContext(capture(diagnostics)) } just runs
+
+        agent.sendMessage(agentRequest("Explain optimistic locking"))
+        agent.sendMessage(agentRequest("Explain it again"))
+
+        assertTrue(requests[0].messages[1].content.contains("USER PROFILE \"Developer\""))
+        assertTrue(requests[1].messages[1].content.contains("USER PROFILE \"Student\""))
+        assertEquals("Developer", diagnostics[0].userProfile?.name)
+        assertEquals("Student", diagnostics[1].userProfile?.name)
+        assertEquals(4, conversation.messages().size)
+        verify(exactly = 0) { contextStateService.reset(any()) }
+    }
+
 
     @Test
     fun `provider options expose configured defaults`() {
@@ -536,6 +587,25 @@ class ChatAgentTest {
         assertTrue(conversation.messages().isEmpty())
         assertEquals(ConversationTokenUsage.ZERO, conversation.tokenUsage())
     }
+
+    private fun profile(
+        id: Long,
+        name: String,
+        expertise: ExpertiseLevel,
+        style: ResponseStyle,
+        format: ResponseFormat,
+    ) = UserProfile(
+        id = id,
+        name = name,
+        responseLanguage = ResponseLanguage.RUSSIAN,
+        expertiseLevel = expertise,
+        responseStyle = style,
+        responseFormat = format,
+        customInstructions = "Profile instructions",
+        createdAt = Instant.parse("2026-01-01T00:00:00Z"),
+        updatedAt = Instant.parse("2026-01-01T00:00:00Z"),
+        active = true,
+    )
 
     private fun agentRequest(
         message: String,

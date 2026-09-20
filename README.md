@@ -18,24 +18,24 @@ Spring AI, LangChain и LangChain4j не используются.
 ## Архитектура
 
 ```text
-Browser ─► ChatController ─► ChatAgent ─► LlmClientResolver ─► OpenAI/OpenRouter
-                                │
-                                ├─► TaskService ─► TaskRepository
-                                ├─► MemoryService ─► MemoryExtractor ─► LlmClientResolver
-                                ├─► ContextStrategyResolver
-                                │     ├─► SlidingWindowContextStrategy
-                                │     ├─► StickyFactsContextStrategy ─► FactsExtractor
-                                │     └─► BranchingContextStrategy ─► branch graph
-                                │
-                                └─► repositories ─► SQLite
+Browser ─► ChatController/UserProfileController ─► ChatAgent ─► LlmClientResolver ─► OpenAI/OpenRouter
+                                                       │
+                                                       ├─► EffectiveContextBuilder
+                                                       │     ├─► UserProfileService ─► UserProfileRepository
+                                                       │     ├─► MemoryService ─► MemoryRepository
+                                                       │     └─► ContextStrategyResolver
+                                                       ├─► TaskService ─► TaskRepository
+                                                       ├─► MemoryExtractor ─► LlmClientResolver
+                                                       └─► repositories ─► SQLite
 ```
 
 - `ChatController` отвечает за REST-контракт, validation и вызов provider-neutral `Agent`.
 - `ChatAgent` не знает URL, API keys или HTTP headers providers. Для каждого запроса он независимо выбирает `LlmClient` и `ContextStrategy`.
-- Persistent `Task` определяет текущие `Conversation`, branch graph, token usage, Sticky Facts и Working Memory. Long-Term Memory глобальна и не переключается вместе с Task.
-- `MemoryExtractor` использует тот же `LlmClientResolver`, но отдельные provider/model/system prompt. Один structured result явно разделяет изменения `WORKING` и `LONG_TERM`.
-- Context strategy формирует только effective Short-Term. Main request строится в порядке `system prompt → Long-Term → Working → effective Short-Term → current USER`; конфликт разрешается как `current USER > Working > Long-Term`.
-- `SqliteConversationRepository` атомарно сохраняет завершённые пары `USER + ASSISTANT` и usage в scope активной Task.
+- Persistent `Task` определяет текущие `Conversation`, branch graph, token usage, Sticky Facts и Working Memory. Persistent `UserProfile` — независимое глобальное измерение: переключение Profile не меняет Task или memory.
+- `EffectiveContextBuilder` — единственный pipeline основного LLM context. Он объединяет system prompt, Long-Term, explicit User Profile, Working, effective Short-Term и current message.
+- Конфликты разрешаются как `current USER > Working/Task > User Profile > Long-Term > application defaults`.
+- `MemoryExtractor`, Facts Extractor и Rolling Summary используют собственные prompts и не получают User Profile.
+- `SqliteConversationRepository` атомарно сохраняет завершённые пары `USER + ASSISTANT` и provider-reported usage в scope активной Task; profile tokens вручную не прибавляются.
 - Ошибка Memory Extractor не отменяет успешный основной ответ и не изменяет существующую memory. При ошибке сохранения Conversation in-memory messages и накопленная статистика откатываются.
 
 ## Настройка
@@ -145,6 +145,23 @@ Main:     A ─ B ─ C ─ D
 
 Effective history `Branch 1` равна `A…D + E…F`, а `Branch 2` — `A…D + G…H`; сообщения одной ветки не попадают в контекст другой. Parent, checkpoint, active branch и собственные messages переживают restart.
 
+### User Profiles
+
+User Profile хранит explicit personalization отдельно от learned Long-Term Memory. Поддерживаются несколько профилей и один active Profile. Первый созданный Profile активируется автоматически; выбор сохраняется в SQLite независимо от активной Task.
+
+Поля:
+
+- `name`;
+- `responseLanguage`: `RUSSIAN`, `ENGLISH`;
+- `expertiseLevel`: `BEGINNER`, `INTERMEDIATE`, `ADVANCED`;
+- `responseStyle`: `CONCISE`, `DETAILED`, `EDUCATIONAL`, `TECHNICAL`;
+- `responseFormat`: `TEXT`, `STRUCTURED`, `CODE_FIRST`, `STEP_BY_STEP`;
+- многострочные `customInstructions`.
+
+Profile применяется только к основным пользовательским LLM requests. Builder преобразует enum values в понятные model instructions. Task-specific `language = Java` перекрывает profile preference Kotlin; explicit current request `Answer in English` перекрывает profile language Russian. Effective Context Inspector сохраняет snapshot фактически использованного Profile, поэтому последующее редактирование не изменяет диагностику прошлого запроса.
+
+UI содержит selector, создание и редактирование Profile. API keys и похожие секреты отклоняются validation и дополнительно маскируются перед LLM request/diagnostic persistence.
+
 ### Memory Layers и Tasks
 
 UI позволяет создать, выбрать и завершить Task. Завершённая Task остаётся в SQLite вместе с Conversation, Working Memory и branches, но становится read-only.
@@ -189,6 +206,7 @@ Upsert заменяет значение по стабильному key; delete
 SQLite schema содержит:
 
 - `agent_task`, `active_task_state` — Task lifecycle и выбранная Task;
+- `user_profile`, `active_profile_state` — Profile settings и глобально выбранный Profile;
 - `chat_message`, `llm_request_usage` — task-scoped Conversation и token usage;
 - `task_conversation_summary` — task-scoped Rolling Summary state;
 - `task_conversation_fact` — task-scoped Sticky Facts;
@@ -196,7 +214,7 @@ SQLite schema содержит:
 - `working_memory` — key-value entries с составным ключом `(task_id, key)`;
 - `long_term_memory` — глобальные key-value entries;
 - `last_memory_update` — последняя классификация сообщения по Task;
-- `effective_context` — sanitized logical snapshot последнего main request по Task.
+- `effective_context` — sanitized logical snapshot последнего main request по Task, включая фактически использованный User Profile.
 
 Legacy `conversation_summary` и `conversation_fact` сохраняются только для безопасной migration существующей базы. При первом запуске их данные копируются в task-scoped таблицы default Task. Если legacy summary cursor превышает число мигрированных сообщений, повреждённый summary удаляется, а Conversation и usage сохраняются.
 
@@ -208,6 +226,7 @@ System prompt в базу Conversation не записывается и доба
 2. остановить и снова запустить приложение с тем же `AGENT_DB_PATH`;
 3. открыть UI — выбранная Task, её Conversation, Working Memory, branches и token usage восстановятся;
 4. переключить Task — Long-Term останется общей, а Conversation и Working Memory сменятся.
+5. active Profile и все его settings также восстановятся независимо от выбранной Task.
 
 Для отдельной базы:
 
@@ -236,6 +255,18 @@ GET /api/chat/providers
 ```
 
 Возвращает `OPENAI`, `OPENROUTER` и настроенные default models. UI использует endpoint для selector и позволяет вручную изменить model id.
+
+### User Profiles
+
+```http
+GET  /api/chat/profiles
+GET  /api/chat/profiles/active
+POST /api/chat/profiles
+PUT  /api/chat/profiles/{profileId}
+POST /api/chat/profiles/{profileId}/activate
+```
+
+Create/update принимают `name`, `responseLanguage`, `expertiseLevel`, `responseStyle`, `responseFormat`, `customInstructions`. Profile switching не очищает Conversation или memory.
 
 ### Tasks и Memory
 
@@ -338,4 +369,4 @@ API возвращает JSON вида:
 ./gradlew build
 ```
 
-Unit tests проверяют providers/plugins, token usage, Sliding/Sticky/Branching contexts, оба LLM extractor и Effective Context ordering/redaction. SQLite integration tests проверяют Task switch/restart, Working isolation, global Long-Term, stable-key upsert/delete, независимые clears/reset и task-scoped branches/conversations.
+Unit tests проверяют providers/plugins, provider token usage, Context Strategies, оба internal extractor, Profile validation, три варианта personalization и semantic priority. SQLite integration tests проверяют Task/Profile switch, Profile edit/restart, Working isolation, global Long-Term, independent reset и schema migration `effective_context.user_profile`.

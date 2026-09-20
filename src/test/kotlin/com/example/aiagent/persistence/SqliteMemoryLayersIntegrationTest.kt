@@ -11,6 +11,11 @@ import com.example.aiagent.memory.MemoryChangeType
 import com.example.aiagent.memory.MemoryEntry
 import com.example.aiagent.memory.MemoryLayerUpdate
 import com.example.aiagent.memory.MemoryUpdate
+import com.example.aiagent.profile.ExpertiseLevel
+import com.example.aiagent.profile.ResponseFormat
+import com.example.aiagent.profile.ResponseLanguage
+import com.example.aiagent.profile.ResponseStyle
+import com.example.aiagent.profile.UserProfileSnapshot
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertNull
@@ -212,9 +217,23 @@ class SqliteMemoryLayersIntegrationTest {
     }
 
     @Test
-    fun `effective context logical sections survive repository recreation`() {
+    fun `effective context profile column migrates and logical sections survive recreation`() {
         val databasePath = tempDirectory.resolve("effective-context.db")
         val jdbc = jdbcTemplate(databasePath)
+        jdbc.execute(
+            """
+            CREATE TABLE effective_context (
+                task_id INTEGER PRIMARY KEY,
+                strategy TEXT NOT NULL,
+                system_prompt TEXT NOT NULL,
+                long_term_memory TEXT NOT NULL,
+                working_memory TEXT NOT NULL,
+                short_term TEXT NOT NULL,
+                current_user_message TEXT NOT NULL,
+                prepared_at TEXT NOT NULL
+            )
+            """.trimIndent(),
+        )
         val tasks = SqliteTaskRepository(jdbc)
         val task = tasks.create("Task A")
         val prepared = EffectiveContext(
@@ -222,6 +241,15 @@ class SqliteMemoryLayersIntegrationTest {
             strategy = ContextStrategyType.SLIDING_WINDOW,
             systemPrompt = "System",
             longTermMemory = listOf(MemoryEntry("preferred_language", "Russian")),
+            userProfile = UserProfileSnapshot(
+                id = 3,
+                name = "Developer",
+                responseLanguage = ResponseLanguage.RUSSIAN,
+                expertiseLevel = ExpertiseLevel.ADVANCED,
+                responseStyle = ResponseStyle.CONCISE,
+                responseFormat = ResponseFormat.CODE_FIRST,
+                customInstructions = "Prefer Kotlin.",
+            ),
             workingMemory = listOf(MemoryEntry("database", "PostgreSQL")),
             shortTerm = listOf(ChatMessage(Role.ASSISTANT, "Previous answer")),
             currentUserMessage = ChatMessage(Role.USER, "Current question"),

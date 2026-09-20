@@ -1,14 +1,11 @@
 package com.example.aiagent.memory
 
 import com.example.aiagent.agent.ChatMessage
-import com.example.aiagent.agent.Role
 import com.example.aiagent.config.MemoryProperties
-import com.example.aiagent.context.strategy.ContextPlan
-import com.example.aiagent.context.strategy.ContextStrategyType
+import com.example.aiagent.profile.UserProfileSnapshot
 import com.example.aiagent.task.AgentTask
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
-import java.time.Instant
 
 @Service
 class MemoryService(
@@ -23,19 +20,12 @@ class MemoryService(
 
     fun context(task: AgentTask): MemoryContext {
         if (!properties.enabled) {
-            return MemoryContext(emptyList(), emptyList(), emptyList())
+            return MemoryContext(emptyList(), emptyList())
         }
-        val longTerm = repository.findLongTerm()
-        val working = repository.findWorking(task.id)
-        val messages = buildList {
-            if (longTerm.isNotEmpty()) {
-                add(ChatMessage(Role.SYSTEM, formatLongTerm(longTerm)))
-            }
-            if (working.isNotEmpty()) {
-                add(ChatMessage(Role.SYSTEM, formatWorking(task, working)))
-            }
-        }
-        return MemoryContext(longTerm, working, messages)
+        return MemoryContext(
+            longTerm = repository.findLongTerm(),
+            working = repository.findWorking(task.id),
+        )
     }
 
     fun extractAfterSuccessfulExchange(task: AgentTask, userMessage: ChatMessage) {
@@ -64,24 +54,15 @@ class MemoryService(
         }
     }
 
-    fun recordEffectiveContext(
-        task: AgentTask,
-        strategy: ContextStrategyType,
-        systemPrompt: String,
-        memoryContext: MemoryContext,
-        contextPlan: ContextPlan,
-        currentUserMessage: ChatMessage,
-    ) {
+    fun recordEffectiveContext(context: EffectiveContext) {
         repository.saveEffectiveContext(
-            EffectiveContext(
-                taskId = task.id,
-                strategy = strategy,
-                systemPrompt = secretRedactor.redact(systemPrompt),
-                longTermMemory = memoryContext.longTerm.map(::redact),
-                workingMemory = memoryContext.working.map(::redact),
-                shortTerm = contextPlan.contextMessages.map(::redact),
-                currentUserMessage = redact(currentUserMessage),
-                preparedAt = Instant.now(),
+            context.copy(
+                systemPrompt = secretRedactor.redact(context.systemPrompt),
+                longTermMemory = context.longTermMemory.map(::redact),
+                userProfile = context.userProfile?.let(::redact),
+                workingMemory = context.workingMemory.map(::redact),
+                shortTerm = context.shortTerm.map(::redact),
+                currentUserMessage = redact(context.currentUserMessage),
             ),
         )
     }
@@ -101,19 +82,12 @@ class MemoryService(
 
     private fun redact(entry: MemoryEntry) = entry.copy(value = secretRedactor.redact(entry.value))
 
+    private fun redact(profile: UserProfileSnapshot) = profile.copy(
+        name = secretRedactor.redact(profile.name),
+        customInstructions = secretRedactor.redact(profile.customInstructions),
+    )
+
     private fun redact(message: ChatMessage) = message.copy(content = secretRedactor.redact(message.content))
-
-    private fun formatLongTerm(entries: List<MemoryEntry>): String = buildString {
-        appendLine("LONG-TERM MEMORY (global; lowest memory priority):")
-        entries.forEach { entry -> appendLine("- ${entry.key} = ${entry.value}") }
-        append("Working Memory and the current user message override conflicting values here.")
-    }
-
-    private fun formatWorking(task: AgentTask, entries: List<MemoryEntry>): String = buildString {
-        appendLine("WORKING MEMORY for Task \"${task.name}\" (overrides Long-Term Memory):")
-        entries.forEach { entry -> appendLine("- ${entry.key} = ${entry.value}") }
-        append("The current user message overrides conflicting values here.")
-    }
 
     companion object {
         private val logger = LoggerFactory.getLogger(MemoryService::class.java)
@@ -123,5 +97,4 @@ class MemoryService(
 data class MemoryContext(
     val longTerm: List<MemoryEntry>,
     val working: List<MemoryEntry>,
-    val messages: List<ChatMessage>,
 )

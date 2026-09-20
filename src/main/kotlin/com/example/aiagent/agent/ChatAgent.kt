@@ -1,7 +1,7 @@
 package com.example.aiagent.agent
 
-import com.example.aiagent.config.LlmProperties
 import com.example.aiagent.context.ContextStateService
+import com.example.aiagent.context.EffectiveContextBuilder
 import com.example.aiagent.context.branch.ConversationBranch
 import com.example.aiagent.context.branch.ConversationBranchService
 import com.example.aiagent.context.strategy.ContextStrategyResolver
@@ -12,6 +12,7 @@ import com.example.aiagent.llm.LlmRequest
 import com.example.aiagent.memory.MemoryInspector
 import com.example.aiagent.memory.MemoryService
 import com.example.aiagent.persistence.ConversationRepository
+import com.example.aiagent.profile.UserProfileService
 import com.example.aiagent.task.AgentTask
 import com.example.aiagent.task.TaskService
 import com.example.aiagent.task.TaskStatus
@@ -22,12 +23,13 @@ class ChatAgent(
     private val llmClientResolver: LlmClientResolver,
     conversation: Conversation,
     private val conversationRepository: ConversationRepository,
-    private val properties: LlmProperties,
     private val contextStrategyResolver: ContextStrategyResolver,
     private val contextStateService: ContextStateService,
     private val branchService: ConversationBranchService,
     private val taskService: TaskService,
     private val memoryService: MemoryService,
+    private val effectiveContextBuilder: EffectiveContextBuilder,
+    private val userProfileService: UserProfileService,
 ) : Agent {
     private var conversation = conversation
 
@@ -59,24 +61,19 @@ class ChatAgent(
         val contextStrategy = contextStrategyResolver.resolve(request.contextStrategy)
         val contextPlan = contextStrategy.buildContext(conversation)
         val memoryContext = memoryService.context(task)
-        val systemPrompt = properties.systemPrompt.trim()
-        val llmRequest = LlmRequest(
-            model = model,
-            messages = buildList {
-                add(ChatMessage(Role.SYSTEM, systemPrompt))
-                addAll(memoryContext.messages)
-                addAll(contextPlan.contextMessages)
-                add(userMessage)
-            },
-        )
-        memoryService.recordEffectiveContext(
+        val preparedContext = effectiveContextBuilder.build(
             task = task,
+            profile = userProfileService.activeProfile(),
             strategy = request.contextStrategy,
-            systemPrompt = systemPrompt,
             memoryContext = memoryContext,
             contextPlan = contextPlan,
             currentUserMessage = userMessage,
         )
+        val llmRequest = LlmRequest(
+            model = model,
+            messages = preparedContext.messages,
+        )
+        memoryService.recordEffectiveContext(preparedContext.diagnostic)
 
         val startedAt = System.nanoTime()
         val llmClient = llmClientResolver.resolve(request.provider)
