@@ -7,32 +7,33 @@ import org.springframework.stereotype.Component
 class ConversationBranchService(
     private val repository: ConversationBranchRepository,
 ) {
-    fun branches(): List<ConversationBranch> = repository.findAll()
+    fun branches(taskId: Long): List<ConversationBranch> = repository.findAll(taskId)
 
-    fun activeHistory(seedHistory: List<ChatMessage>): List<ChatMessage> {
-        repository.ensureMainInitialized(seedHistory)
-        return repository.effectiveHistory(repository.activeBranch().id)
+    fun activeHistory(taskId: Long, seedHistory: List<ChatMessage>): List<ChatMessage> {
+        repository.ensureMainInitialized(taskId, seedHistory)
+        return repository.effectiveHistory(taskId, repository.activeBranch(taskId).id)
     }
 
-    fun createBranch(seedHistory: List<ChatMessage>): ConversationBranch {
-        repository.ensureMainInitialized(seedHistory)
-        return repository.createFromActive()
+    fun createBranch(taskId: Long, seedHistory: List<ChatMessage>): ConversationBranch {
+        repository.ensureMainInitialized(taskId, seedHistory)
+        return repository.createFromActive(taskId)
     }
 
     fun activateBranch(
+        taskId: Long,
         branchId: Long,
         seedHistory: List<ChatMessage>,
     ): List<ChatMessage> {
-        repository.ensureMainInitialized(seedHistory)
-        repository.activate(branchId)
-        return repository.effectiveHistory(branchId)
+        repository.ensureMainInitialized(taskId, seedHistory)
+        repository.activate(taskId, branchId)
+        return repository.effectiveHistory(taskId, branchId)
     }
 
-    fun appendToActive(messages: List<ChatMessage>) {
-        repository.appendToActive(messages)
+    fun appendToActive(taskId: Long, messages: List<ChatMessage>) {
+        repository.appendToActive(taskId, messages)
     }
 
-    fun reset() {
-        repository.reset()
+    fun reset(taskId: Long) {
+        repository.reset(taskId)
     }
 }

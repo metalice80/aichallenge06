@@ -32,7 +32,11 @@ class ApiExceptionHandler {
         return error(HttpStatus.BAD_REQUEST, message)
     }
 
-    @ExceptionHandler(HttpMessageNotReadableException::class, InvalidMessageException::class)
+    @ExceptionHandler(
+        HttpMessageNotReadableException::class,
+        InvalidMessageException::class,
+        IllegalArgumentException::class,
+    )
     fun handleBadRequest(exception: Exception): ResponseEntity<ApiError> {
         logger.debug("Rejected chat request with {}", exception.javaClass.simpleName)
         return error(HttpStatus.BAD_REQUEST, "Некорректные параметры запроса.")

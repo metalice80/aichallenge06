@@ -20,6 +20,8 @@ Spring AI, LangChain и LangChain4j не используются.
 ```text
 Browser ─► ChatController ─► ChatAgent ─► LlmClientResolver ─► OpenAI/OpenRouter
                                 │
+                                ├─► TaskService ─► TaskRepository
+                                ├─► MemoryService ─► MemoryExtractor ─► LlmClientResolver
                                 ├─► ContextStrategyResolver
                                 │     ├─► SlidingWindowContextStrategy
                                 │     ├─► StickyFactsContextStrategy ─► FactsExtractor
@@ -30,11 +32,11 @@ Browser ─► ChatController ─► ChatAgent ─► LlmClientResolver ─► O
 
 - `ChatController` отвечает за REST-контракт, validation и вызов provider-neutral `Agent`.
 - `ChatAgent` не знает URL, API keys или HTTP headers providers. Для каждого запроса он независимо выбирает `LlmClient` и `ContextStrategy`.
-- `DefaultLlmClientResolver` выбирает OpenAI/OpenRouter client по `LlmProvider`; `DefaultContextStrategyResolver` выбирает одну из трёх context strategies по `ContextStrategyType`.
-- Strategy возвращает только сообщения контекста для основного LLM-вызова. Новый `USER` message и общий system prompt добавляет `ChatAgent`.
-- Полная хронологическая история и provider-reported token usage сохраняются независимо от выбранной strategy. Переключение strategy не удаляет facts, branches, messages или statistics.
-- `SqliteConversationRepository` атомарно сохраняет завершённые пары `USER + ASSISTANT` и usage каждого успешного основного LLM-вызова.
-- При ошибке основного LLM память и SQLite не изменяются. При ошибке сохранения in-memory messages и накопленная статистика откатываются.
+- Persistent `Task` определяет текущие `Conversation`, branch graph, token usage, Sticky Facts и Working Memory. Long-Term Memory глобальна и не переключается вместе с Task.
+- `MemoryExtractor` использует тот же `LlmClientResolver`, но отдельные provider/model/system prompt. Один structured result явно разделяет изменения `WORKING` и `LONG_TERM`.
+- Context strategy формирует только effective Short-Term. Main request строится в порядке `system prompt → Long-Term → Working → effective Short-Term → current USER`; конфликт разрешается как `current USER > Working > Long-Term`.
+- `SqliteConversationRepository` атомарно сохраняет завершённые пары `USER + ASSISTANT` и usage в scope активной Task.
+- Ошибка Memory Extractor не отменяет успешный основной ответ и не изменяет существующую memory. При ошибке сохранения Conversation in-memory messages и накопленная статистика откатываются.
 
 ## Настройка
 
@@ -68,6 +70,9 @@ export OPENROUTER_MODEL="openai/gpt-4o-mini"
 | `CONTEXT_STICKY_FACTS_WINDOW_SIZE` | `20` | количество recent messages рядом с Sticky Facts |
 | `CONTEXT_FACTS_PROVIDER` | `OPENAI` | отдельный provider facts extractor |
 | `CONTEXT_FACTS_MODEL` | `gpt-4o-mini` | отдельная model facts extractor |
+| `MEMORY_ENABLED` | `true` | включает extraction и добавление memory layers в main context |
+| `MEMORY_EXTRACTOR_PROVIDER` | `OPENAI` | provider отдельного Memory Extractor |
+| `MEMORY_EXTRACTOR_MODEL` | `gpt-4o-mini` | model отдельного Memory Extractor |
 | `AGENT_DB_PATH` | `./data/agent.db` | путь к SQLite database |
 
 API keys не включаются в frontend, REST responses или логи. System prompt находится в `src/main/resources/application.yml`.
@@ -140,37 +145,77 @@ Main:     A ─ B ─ C ─ D
 
 Effective history `Branch 1` равна `A…D + E…F`, а `Branch 2` — `A…D + G…H`; сообщения одной ветки не попадают в контекст другой. Parent, checkpoint, active branch и собственные messages переживают restart.
 
+### Memory Layers и Tasks
+
+UI позволяет создать, выбрать и завершить Task. Завершённая Task остаётся в SQLite вместе с Conversation, Working Memory и branches, но становится read-only.
+
+- `SHORT_TERM` — существующая `Conversation` активной Task; selected Context Strategy определяет только её effective часть.
+- `WORKING` — task-scoped key-value state: цель, ограничения, технологии и решения текущей Task.
+- `LONG_TERM` — глобальные key-value предпочтения и знания между Tasks.
+
+```yaml
+memory:
+  enabled: true
+  extractor:
+    provider: OPENAI
+    model: gpt-4o-mini
+    system-prompt: |-
+      Проанализируй новое сообщение пользователя...
+```
+
+Extractor возвращает один JSON:
+
+```json
+{
+  "working": {
+    "upsert": [{"key": "database", "value": "PostgreSQL"}],
+    "delete": []
+  },
+  "longTerm": {
+    "upsert": [{"key": "preferred_code_language", "value": "Kotlin"}],
+    "delete": []
+  }
+}
+```
+
+Upsert заменяет значение по стабильному key; delete удаляет key. Изменения двух слоёв применяются одной SQLite transaction. Memory Inspector показывает effective Short-Term, Working и Long-Term; `Last Memory Update` показывает added/updated/deleted; `Effective Context` показывает логические секции последнего main request. Похожие JSON parsing и `LlmClientResolver` infrastructure разделяются со Sticky Facts. Секреты в Effective Context маскируются.
+
 ### Rolling Context Compression
 
-Существующая реализация Rolling Summary, её configuration properties и persisted `conversation_summary` сохранены отдельно. Она намеренно не зарегистрирована как одна из трёх selectable strategies и не добавляется к их LLM contexts: Sliding Window, Sticky Facts и Branching никогда не смешиваются с summary/cursor.
+Существующая реализация Rolling Summary и её configuration properties сохранены отдельно; persisted state теперь task-scoped в `task_conversation_summary`. Rolling Summary намеренно не зарегистрирована как одна из трёх selectable strategies и не добавляется к их LLM contexts: Sliding Window, Sticky Facts и Branching никогда не смешиваются с summary/cursor.
 
 ## Persistent context
 
-При первом запуске приложение создаёт родительскую директорию, SQLite-файл и шесть таблиц:
+SQLite schema содержит:
 
-- `chat_message` — полная хронологическая история сообщений;
-- `llm_request_usage` — usage каждого успешного основного запроса;
-- `conversation_summary` — сохранённое состояние отдельной legacy Rolling Summary реализации;
-- `conversation_fact` — Sticky Facts с уникальным key, value и временем обновления;
-- `conversation_branch` — branch graph, parent, checkpoint и active marker;
-- `branch_message` — только собственные сообщения каждой ветки и их порядок.
+- `agent_task`, `active_task_state` — Task lifecycle и выбранная Task;
+- `chat_message`, `llm_request_usage` — task-scoped Conversation и token usage;
+- `task_conversation_summary` — task-scoped Rolling Summary state;
+- `task_conversation_fact` — task-scoped Sticky Facts;
+- `conversation_branch`, `branch_message` — task-scoped branch graph и собственные branch messages;
+- `working_memory` — key-value entries с составным ключом `(task_id, key)`;
+- `long_term_memory` — глобальные key-value entries;
+- `last_memory_update` — последняя классификация сообщения по Task;
+- `effective_context` — sanitized logical snapshot последнего main request по Task.
 
-System prompt в базу не записывается и добавляется Agent при каждом LLM-запросе. Накопленные totals вычисляются как суммы persisted usage: смена provider, model, strategy или branch не сбрасывает и не дублирует статистику.
+Legacy `conversation_summary` и `conversation_fact` сохраняются только для безопасной migration существующей базы. При первом запуске их данные копируются в task-scoped таблицы default Task. Если legacy summary cursor превышает число мигрированных сообщений, повреждённый summary удаляется, а Conversation и usage сохраняются.
+
+System prompt в базу Conversation не записывается и добавляется Agent при каждом LLM-запросе. Накопленные totals вычисляются по Task как суммы persisted usage.
 
 Чтобы проверить восстановление:
 
-1. запустить приложение и выполнить несколько успешных обменов;
+1. создать две Tasks и выполнить несколько успешных обменов;
 2. остановить и снова запустить приложение с тем же `AGENT_DB_PATH`;
-3. открыть UI — сохранённые сообщения и накопленная статистика будут загружены через `GET /api/chat/state`;
-4. задать вопрос, зависящий от предыдущего контекста: токены нового запроса добавятся к восстановленным totals.
+3. открыть UI — выбранная Task, её Conversation, Working Memory, branches и token usage восстановятся;
+4. переключить Task — Long-Term останется общей, а Conversation и Working Memory сменятся.
 
 Для отдельной базы:
 
 ```bash
-export AGENT_DB_PATH=\"./data/local-agent.db\"
+export AGENT_DB_PATH="./data/local-agent.db"
 ```
 
-Очищать SQLite-файл вручную не требуется: кнопка `Сбросить чат` удаляет messages, usage, rolling summary, Sticky Facts и весь branch graph, затем создаёт пустую активную ветку `Main`.
+`Сбросить чат` очищает только Short-Term state активной Task: messages, usage, rolling summary, Sticky Facts и её branch graph. Working и Long-Term не удаляются. Для них в UI есть отдельные действия; очистка Long-Term требует confirmation.
 
 ## Запуск
 
@@ -191,6 +236,21 @@ GET /api/chat/providers
 ```
 
 Возвращает `OPENAI`, `OPENROUTER` и настроенные default models. UI использует endpoint для selector и позволяет вручную изменить model id.
+
+### Tasks и Memory
+
+```http
+GET  /api/chat/tasks
+POST /api/chat/tasks
+POST /api/chat/tasks/{taskId}/activate
+POST /api/chat/tasks/{taskId}/complete
+
+GET  /api/chat/memory?contextStrategy=SLIDING_WINDOW
+POST /api/chat/memory/working/clear
+POST /api/chat/memory/long-term/clear
+```
+
+`GET /memory` возвращает три слоя, Last Memory Update и sanitized Effective Context. Working clear действует только на выбранную Task; Long-Term clear глобален.
 
 ### Context strategies и branches
 
@@ -217,7 +277,7 @@ GET /api/chat/history
 GET /api/chat/state
 ```
 
-Возвращает видимые сообщения и `conversationUsage`. UI использует этот endpoint при открытии страницы, поэтому накопленные input/output/total tokens восстанавливаются после restart. Статистика последнего запроса после restart не восстанавливается.
+Возвращает видимые сообщения и `conversationUsage` выбранной Task. UI использует endpoint при открытии страницы и после переключения Task.
 
 ### Отправка сообщения
 
@@ -259,7 +319,7 @@ OpenRouter использует тот же контракт с provider `OPENRO
 POST /api/chat/reset
 ```
 
-Ответ: `204 No Content`. Reset очищает in-memory `Conversation`, все persisted messages/usage/summary/facts/branches и создаёт свежую пустую `Main`; после restart старое состояние не возвращается.
+Ответ: `204 No Content`. Reset очищает Short-Term state только выбранной Task и не затрагивает Working/Long-Term или другие Tasks.
 
 ## Ошибки
 
@@ -278,4 +338,4 @@ API возвращает JSON вида:
 ./gradlew build
 ```
 
-Unit-тесты проверяют выбор OpenAI/OpenRouter, plugins, provider-reported usage, resolver, точные Sliding/Sticky/Branching contexts, facts extractor и независимые provider/model. SQLite integration tests проверяют restart, upsert/delete facts, parent checkpoints, две расходящиеся ветки без копирования inherited messages, token usage и полный reset.
+Unit tests проверяют providers/plugins, token usage, Sliding/Sticky/Branching contexts, оба LLM extractor и Effective Context ordering/redaction. SQLite integration tests проверяют Task switch/restart, Working isolation, global Long-Term, stable-key upsert/delete, независимые clears/reset и task-scoped branches/conversations.

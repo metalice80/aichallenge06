@@ -21,7 +21,7 @@ class StickyFactsContextStrategy(
 
     override fun buildContext(conversation: Conversation): ContextPlan {
         val history = conversation.messages()
-        val facts = factsRepository.findAll()
+        val facts = factsRepository.findAll(conversation.taskId)
         return ContextPlan(
             contextMessages = buildList {
                 if (facts.isNotEmpty()) {
@@ -33,12 +33,16 @@ class StickyFactsContextStrategy(
     }
 
     override fun afterSuccessfulExchange(
+        conversation: Conversation,
         userMessage: ChatMessage,
         assistantMessage: ChatMessage,
     ) {
         try {
-            val update = factsExtractor.extract(factsRepository.findAll(), userMessage)
-            factsRepository.apply(update)
+            val update = factsExtractor.extract(
+                factsRepository.findAll(conversation.taskId),
+                userMessage,
+            )
+            factsRepository.apply(conversation.taskId, update)
         } catch (exception: RuntimeException) {
             logger.warn("Sticky Facts extraction failed; existing facts remain unchanged", exception)
         }

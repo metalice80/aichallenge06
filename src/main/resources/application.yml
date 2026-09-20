@@ -21,7 +21,7 @@ llm:
 context:
   strategies:
     sliding-window:
-      size: ${CONTEXT_SLIDING_WINDOW_SIZE:2}
+      size: ${CONTEXT_SLIDING_WINDOW_SIZE:20}
     sticky-facts:
       window-size: ${CONTEXT_STICKY_FACTS_WINDOW_SIZE:20}
       extractor:
@@ -53,6 +53,24 @@ context:
       4. текущее состояние задачи;
       5. открытые вопросы;
       6. остальной контекст.
+
+memory:
+  enabled: ${MEMORY_ENABLED:true}
+  extractor:
+    provider: ${MEMORY_EXTRACTOR_PROVIDER:OPENAI}
+    model: ${MEMORY_EXTRACTOR_MODEL:gpt-4o-mini}
+    system-prompt: |-
+      Проанализируй новое сообщение пользователя.
+      В WORKING сохраняй только цели, ограничения, параметры,
+      решения, технологии и договорённости текущей Task.
+      В LONG_TERM сохраняй только устойчивые предпочтения,
+      профиль и знания, полезные между разными Tasks.
+      Не сохраняй приветствия, случайные фразы, секреты
+      или временные детали. Не придумывай информацию.
+      Обновляй существующий key при изменении значения.
+      Удаляй key только при явной отмене пользователем.
+      Верни только JSON с working и longTerm,
+      каждый с массивами upsert и delete.
 
 storage:
   database-path: ${AGENT_DB_PATH:./data/agent.db}

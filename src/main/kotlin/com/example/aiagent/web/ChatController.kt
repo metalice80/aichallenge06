@@ -3,20 +3,25 @@ package com.example.aiagent.web
 import com.example.aiagent.agent.Agent
 import com.example.aiagent.agent.AgentRequest
 import com.example.aiagent.agent.Role
+import com.example.aiagent.context.strategy.ContextStrategyType
+import com.example.aiagent.web.dto.ChatHistoryResponse
 import com.example.aiagent.web.dto.ChatRequest
+import com.example.aiagent.web.dto.ChatResponse
+import com.example.aiagent.web.dto.ChatStateResponse
 import com.example.aiagent.web.dto.ContextStrategyOptionResponse
 import com.example.aiagent.web.dto.ConversationBranchResponse
-import com.example.aiagent.web.dto.ChatHistoryResponse
-import com.example.aiagent.web.dto.ChatStateResponse
+import com.example.aiagent.web.dto.CreateTaskRequest
 import com.example.aiagent.web.dto.LlmProviderOptionResponse
-import com.example.aiagent.web.dto.ChatResponse
+import com.example.aiagent.web.dto.MemoryInspectorResponse
+import com.example.aiagent.web.dto.TaskResponse
 import jakarta.validation.Valid
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.GetMapping
-import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.PathVariable
+import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestMapping
+import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.RestController
 
 @RestController
@@ -41,6 +46,21 @@ class ChatController(
     fun contextStrategies(): List<ContextStrategyOptionResponse> =
         agent.contextStrategies().map(ContextStrategyOptionResponse::from)
 
+    @GetMapping("/tasks")
+    fun tasks(): List<TaskResponse> = agent.tasks().map(TaskResponse::from)
+
+    @PostMapping("/tasks")
+    fun createTask(@Valid @RequestBody request: CreateTaskRequest): ChatStateResponse =
+        ChatStateResponse.from(agent.createTask(request.name))
+
+    @PostMapping("/tasks/{taskId}/activate")
+    fun activateTask(@PathVariable taskId: Long): ChatStateResponse =
+        ChatStateResponse.from(agent.activateTask(taskId))
+
+    @PostMapping("/tasks/{taskId}/complete")
+    fun completeTask(@PathVariable taskId: Long): TaskResponse =
+        TaskResponse.from(agent.completeTask(taskId))
+
     @GetMapping("/branches")
     fun branches(): List<ConversationBranchResponse> =
         agent.branches().map(ConversationBranchResponse::from)
@@ -52,6 +72,26 @@ class ChatController(
     @PostMapping("/branches/{branchId}/activate")
     fun activateBranch(@PathVariable branchId: Long): ChatStateResponse =
         ChatStateResponse.from(agent.activateBranch(branchId))
+
+    @GetMapping("/memory")
+    fun memory(
+        @RequestParam(defaultValue = "SLIDING_WINDOW") contextStrategy: ContextStrategyType,
+    ): MemoryInspectorResponse = MemoryInspectorResponse.from(
+        agent.memory(contextStrategy),
+        contextStrategy,
+    )
+
+    @PostMapping("/memory/working/clear")
+    fun clearWorkingMemory(): ResponseEntity<Void> {
+        agent.clearWorkingMemory()
+        return ResponseEntity.noContent().build()
+    }
+
+    @PostMapping("/memory/long-term/clear")
+    fun clearLongTermMemory(): ResponseEntity<Void> {
+        agent.clearLongTermMemory()
+        return ResponseEntity.noContent().build()
+    }
 
     @PostMapping
     fun chat(@Valid @RequestBody request: ChatRequest): ChatResponse =

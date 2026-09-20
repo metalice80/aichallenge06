@@ -2,7 +2,9 @@ package com.example.aiagent.agent
 
 import com.example.aiagent.llm.TokenUsage
 
-class Conversation {
+class Conversation(
+    val taskId: Long = 1,
+) {
     private val messages = mutableListOf<ChatMessage>()
     private var tokenUsage = ConversationTokenUsage.ZERO
     private var summary: ConversationSummary? = null

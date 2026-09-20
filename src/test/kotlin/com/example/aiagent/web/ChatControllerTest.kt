@@ -12,8 +12,13 @@ import com.example.aiagent.context.branch.ConversationBranch
 import com.example.aiagent.context.strategy.ContextStrategyType
 import com.example.aiagent.llm.LlmProvider
 import com.example.aiagent.llm.TokenUsage
+import com.example.aiagent.memory.MemoryEntry
+import com.example.aiagent.memory.MemoryInspector
+import com.example.aiagent.task.AgentTask
+import com.example.aiagent.task.TaskStatus
 import com.example.aiagent.web.dto.ChatRequest
 import com.example.aiagent.web.dto.ConversationTokenUsageResponse
+import com.example.aiagent.web.dto.CreateTaskRequest
 import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
@@ -23,6 +28,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
 import org.springframework.http.HttpStatus
+import java.time.Instant
 
 class ChatControllerTest {
     private val agent = mockk<Agent>()
@@ -150,6 +156,50 @@ class ChatControllerTest {
         assertEquals(ConversationTokenUsageResponse(10, 5, 15), activated.conversationUsage)
         verify(exactly = 1) { agent.createBranch() }
         verify(exactly = 1) { agent.activateBranch(2) }
+    }
+
+    @Test
+    fun `Task endpoints list create switch and complete persistent Tasks`() {
+        val createdAt = Instant.parse("2026-01-01T00:00:00Z")
+        val task = AgentTask(4, "Booking", TaskStatus.ACTIVE, createdAt, null, selected = true)
+        val state = AgentState(emptyList(), ConversationTokenUsage.ZERO)
+        every { agent.tasks() } returns listOf(task)
+        every { agent.createTask("Booking") } returns state
+        every { agent.activateTask(4) } returns state
+        every { agent.completeTask(4) } returns task.copy(
+            status = TaskStatus.COMPLETED,
+            completedAt = createdAt.plusSeconds(10),
+        )
+
+        assertEquals("Booking", controller.tasks().single().name)
+        assertEquals(0, controller.createTask(CreateTaskRequest("Booking")).messages.size)
+        assertEquals(0, controller.activateTask(4).messages.size)
+        assertEquals(TaskStatus.COMPLETED, controller.completeTask(4).status)
+    }
+
+    @Test
+    fun `memory endpoint exposes three layers and clear actions remain separate`() {
+        every { agent.memory(ContextStrategyType.SLIDING_WINDOW) } returns MemoryInspector(
+            shortTerm = listOf(ChatMessage(Role.USER, "Recent")),
+            working = listOf(MemoryEntry("database", "PostgreSQL")),
+            longTerm = listOf(MemoryEntry("answer_language", "Russian")),
+            lastUpdate = null,
+            effectiveContext = null,
+        )
+        every { agent.clearWorkingMemory() } just runs
+        every { agent.clearLongTermMemory() } just runs
+
+        val response = controller.memory(ContextStrategyType.SLIDING_WINDOW)
+        val workingClear = controller.clearWorkingMemory()
+        val longTermClear = controller.clearLongTermMemory()
+
+        assertEquals("Recent", response.shortTerm.single().content)
+        assertEquals("database", response.working.single().key)
+        assertEquals("answer_language", response.longTerm.single().key)
+        assertEquals(HttpStatus.NO_CONTENT, workingClear.statusCode)
+        assertEquals(HttpStatus.NO_CONTENT, longTermClear.statusCode)
+        verify(exactly = 1) { agent.clearWorkingMemory() }
+        verify(exactly = 1) { agent.clearLongTermMemory() }
     }
 
     @Test

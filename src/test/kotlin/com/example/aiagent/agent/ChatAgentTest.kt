@@ -18,7 +18,14 @@ import com.example.aiagent.llm.LlmProvider
 import com.example.aiagent.llm.LlmRequest
 import com.example.aiagent.llm.LlmResponse
 import com.example.aiagent.llm.TokenUsage
+import com.example.aiagent.memory.MemoryContext
+import com.example.aiagent.memory.MemoryService
+import com.example.aiagent.memory.MemoryEntry
 import com.example.aiagent.persistence.ConversationRepository
+import com.example.aiagent.task.AgentTask
+import com.example.aiagent.task.TaskRepository
+import com.example.aiagent.task.TaskService
+import com.example.aiagent.task.TaskStatus
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
@@ -28,6 +35,7 @@ import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.io.IOException
+import java.time.Instant
 
 class ChatAgentTest {
     private val openAiClient = mockk<LlmClient> {
@@ -51,6 +59,20 @@ class ChatAgentTest {
     }
     private val contextStateService = mockk<ContextStateService>(relaxed = true)
     private val branchService = mockk<ConversationBranchService>(relaxed = true)
+    private val activeTask = AgentTask(
+        id = 1,
+        name = "Main Task",
+        status = TaskStatus.ACTIVE,
+        createdAt = Instant.parse("2026-01-01T00:00:00Z"),
+        completedAt = null,
+        selected = true,
+    )
+    private val taskService = mockk<TaskService> {
+        every { activeTask() } returns activeTask
+    }
+    private val memoryService = mockk<MemoryService>(relaxed = true) {
+        every { context(activeTask) } returns MemoryContext(emptyList(), emptyList(), emptyList())
+    }
     private val agent = ChatAgent(
         resolver,
         conversation,
@@ -59,6 +81,8 @@ class ChatAgentTest {
         contextStrategyResolver,
         contextStateService,
         branchService,
+        taskService,
+        memoryService,
     )
 
     @Test
@@ -193,7 +217,7 @@ class ChatAgentTest {
         assertTrue(conversation.messages().isEmpty())
         assertEquals(ConversationTokenUsage.ZERO, conversation.tokenUsage())
         assertEquals(ConversationTokenUsage.ZERO, agent.state().conversationUsage)
-        verify(exactly = 1) { contextStateService.reset() }
+        verify(exactly = 1) { contextStateService.reset(1) }
     }
 
     @Test
@@ -236,8 +260,11 @@ class ChatAgentTest {
             )
         }
         val loadingRepository = mockk<ConversationRepository>(relaxed = true)
-        every { loadingRepository.load() } returns persistedConversation
-        val restoredConversation = AgentConfiguration().conversation(loadingRepository)
+        every { loadingRepository.load(1) } returns persistedConversation
+        val taskRepository = mockk<TaskRepository> {
+            every { active() } returns activeTask
+        }
+        val restoredConversation = AgentConfiguration().conversation(loadingRepository, taskRepository)
         val restoredAgent = ChatAgent(
             resolver,
             restoredConversation,
@@ -246,6 +273,8 @@ class ChatAgentTest {
             contextStrategyResolver,
             contextStateService,
             branchService,
+            taskService,
+            memoryService,
         )
         val request = slot<LlmRequest>()
         every { openRouterClient.chat(capture(request)) } returns response("Вы Алексей", "openai/gpt-test")
@@ -268,7 +297,7 @@ class ChatAgentTest {
             request.captured.messages,
         )
         assertEquals(ConversationTokenUsage(100, 15, 115), result.conversationUsage)
-        verify(exactly = 1) { loadingRepository.load() }
+        verify(exactly = 1) { loadingRepository.load(1) }
     }
 
     @Test
@@ -313,6 +342,8 @@ class ChatAgentTest {
             selectedResolver,
             contextStateService,
             branchService,
+            taskService,
+            memoryService,
         )
         val request = slot<LlmRequest>()
         every { openRouterClient.chat(capture(request)) } returns response("Answer")
@@ -337,6 +368,7 @@ class ChatAgentTest {
         )
         verify(exactly = 1) {
             selectedStrategy.afterSuccessfulExchange(
+                strategyConversation,
                 ChatMessage(Role.USER, "New question"),
                 ChatMessage(Role.ASSISTANT, "Answer"),
             )
@@ -368,6 +400,8 @@ class ChatAgentTest {
             switchingResolver,
             contextStateService,
             branchService,
+            taskService,
+            memoryService,
         )
         val requests = mutableListOf<LlmRequest>()
         every { openAiClient.chat(capture(requests)) } returnsMany listOf(
@@ -394,6 +428,90 @@ class ChatAgentTest {
         )
         verify(exactly = 1) { switchingResolver.resolve(ContextStrategyType.SLIDING_WINDOW) }
         verify(exactly = 1) { switchingResolver.resolve(ContextStrategyType.STICKY_FACTS) }
+    }
+
+    @Test
+    fun `main request keeps long-term working short-term and current message in priority order`() {
+        every { memoryService.context(activeTask) } returns MemoryContext(
+            longTerm = listOf(MemoryEntry("preferred_code_language", "Kotlin")),
+            working = listOf(MemoryEntry("language", "Java")),
+            messages = listOf(
+                ChatMessage(Role.SYSTEM, "LONG-TERM: preferred_code_language = Kotlin"),
+                ChatMessage(Role.SYSTEM, "WORKING: language = Java"),
+            ),
+        )
+        conversation.addAll(
+            listOf(
+                ChatMessage(Role.USER, "Old question"),
+                ChatMessage(Role.ASSISTANT, "Old answer"),
+            ),
+        )
+        val request = slot<LlmRequest>()
+        every { openAiClient.chat(capture(request)) } returns response("Current answer")
+
+        agent.sendMessage(agentRequest("Use Python for this answer"))
+
+        assertEquals(
+            listOf(
+                ChatMessage(Role.SYSTEM, "System instruction"),
+                ChatMessage(Role.SYSTEM, "LONG-TERM: preferred_code_language = Kotlin"),
+                ChatMessage(Role.SYSTEM, "WORKING: language = Java"),
+                ChatMessage(Role.USER, "Old question"),
+                ChatMessage(Role.ASSISTANT, "Old answer"),
+                ChatMessage(Role.USER, "Use Python for this answer"),
+            ),
+            request.captured.messages,
+        )
+    }
+
+    @Test
+    fun `memory layers remain outside effective Branching short-term context`() {
+        val branchConversation = Conversation()
+        val branching = mockk<ContextStrategy>(relaxed = true) {
+            every { type } returns ContextStrategyType.BRANCHING
+            every { buildContext(branchConversation) } returns ContextPlan(
+                listOf(ChatMessage(Role.USER, "Active branch history")),
+            )
+        }
+        val branchingResolver = mockk<ContextStrategyResolver> {
+            every { resolve(ContextStrategyType.BRANCHING) } returns branching
+        }
+        every { memoryService.context(activeTask) } returns MemoryContext(
+            longTerm = listOf(MemoryEntry("answer_language", "Russian")),
+            working = listOf(MemoryEntry("database", "PostgreSQL")),
+            messages = listOf(
+                ChatMessage(Role.SYSTEM, "LONG-TERM: answer_language = Russian"),
+                ChatMessage(Role.SYSTEM, "WORKING: database = PostgreSQL"),
+            ),
+        )
+        val branchAgent = ChatAgent(
+            resolver,
+            branchConversation,
+            conversationRepository,
+            properties,
+            branchingResolver,
+            contextStateService,
+            branchService,
+            taskService,
+            memoryService,
+        )
+        val request = slot<LlmRequest>()
+        every { openAiClient.chat(capture(request)) } returns response("Branch answer")
+
+        branchAgent.sendMessage(
+            agentRequest("Branch question", contextStrategy = ContextStrategyType.BRANCHING),
+        )
+
+        assertEquals(
+            listOf(
+                ChatMessage(Role.SYSTEM, "System instruction"),
+                ChatMessage(Role.SYSTEM, "LONG-TERM: answer_language = Russian"),
+                ChatMessage(Role.SYSTEM, "WORKING: database = PostgreSQL"),
+                ChatMessage(Role.USER, "Active branch history"),
+                ChatMessage(Role.USER, "Branch question"),
+            ),
+            request.captured.messages,
+        )
     }
 
     @Test

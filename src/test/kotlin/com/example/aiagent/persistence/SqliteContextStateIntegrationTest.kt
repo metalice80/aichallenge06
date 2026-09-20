@@ -27,24 +27,20 @@ class SqliteContextStateIntegrationTest {
     fun `sticky facts upsert delete and values survive repository recreation`() {
         val databasePath = tempDirectory.resolve("facts-restart.db")
         val firstRepository = SqliteMemoryFactRepository(jdbcTemplate(databasePath))
-        firstRepository.apply(
-            FactsUpdate(
-                upsert = listOf(
-                    MemoryFact("language", "Java"),
-                    MemoryFact("database", "SQLite"),
-                ),
+        firstRepository.apply(1, FactsUpdate(
+            upsert = listOf(
+                MemoryFact("language", "Java"),
+                MemoryFact("database", "SQLite"),
             ),
-        )
-        firstRepository.apply(
-            FactsUpdate(
-                upsert = listOf(MemoryFact("language", "Kotlin")),
-                deleteKeys = listOf("database"),
-            ),
-        )
+        ))
+        firstRepository.apply(1, FactsUpdate(
+            upsert = listOf(MemoryFact("language", "Kotlin")),
+            deleteKeys = listOf("database"),
+        ))
 
         val restoredRepository = SqliteMemoryFactRepository(jdbcTemplate(databasePath))
 
-        assertEquals(listOf(MemoryFact("language", "Kotlin")), restoredRepository.findAll())
+        assertEquals(listOf(MemoryFact("language", "Kotlin")), restoredRepository.findAll(1))
     }
 
     @Test
@@ -65,37 +61,37 @@ class SqliteContextStateIntegrationTest {
                 responseTimeMs = 30,
             ),
         )
-        val mainId = firstService.branches().single().id
-        firstService.activeHistory(commonHistory)
+        val mainId = firstService.branches(1).single().id
+        firstService.activeHistory(1, commonHistory)
         val mainExtension = listOf(
             ChatMessage(Role.USER, "Main question"),
             ChatMessage(Role.ASSISTANT, "Main answer"),
         )
-        firstService.appendToActive(mainExtension)
+        firstService.appendToActive(1, mainExtension)
 
-        val firstChild = firstService.createBranch(emptyList())
+        val firstChild = firstService.createBranch(1, emptyList())
         val firstDivergence = listOf(
             ChatMessage(Role.USER, "Choose option A"),
             ChatMessage(Role.ASSISTANT, "A selected"),
         )
-        firstService.appendToActive(firstDivergence)
+        firstService.appendToActive(1, firstDivergence)
 
-        firstService.activateBranch(mainId, emptyList())
-        val secondChild = firstService.createBranch(emptyList())
+        firstService.activateBranch(1, mainId, emptyList())
+        val secondChild = firstService.createBranch(1, emptyList())
         val secondDivergence = listOf(
             ChatMessage(Role.USER, "Choose option B"),
             ChatMessage(Role.ASSISTANT, "B selected"),
         )
-        firstService.appendToActive(secondDivergence)
+        firstService.appendToActive(1, secondDivergence)
 
         val restoredJdbcTemplate = jdbcTemplate(databasePath)
         val restoredService = ConversationBranchService(SqliteConversationBranchRepository(restoredJdbcTemplate))
         val expectedParentHistory = commonHistory + mainExtension
 
-        assertEquals(secondChild.id, restoredService.branches().single { it.active }.id)
-        assertEquals(expectedParentHistory + secondDivergence, restoredService.activeHistory(emptyList()))
-        assertEquals(expectedParentHistory + firstDivergence, restoredService.activateBranch(firstChild.id, emptyList()))
-        assertEquals(expectedParentHistory, restoredService.activateBranch(mainId, emptyList()))
+        assertEquals(secondChild.id, restoredService.branches(1).single { it.active }.id)
+        assertEquals(expectedParentHistory + secondDivergence, restoredService.activeHistory(1, emptyList()))
+        assertEquals(expectedParentHistory + firstDivergence, restoredService.activateBranch(1, firstChild.id, emptyList()))
+        assertEquals(expectedParentHistory, restoredService.activateBranch(1, mainId, emptyList()))
         assertEquals(mainId, firstChild.parentBranchId)
         assertEquals(mainId, secondChild.parentBranchId)
         assertEquals(expectedParentHistory.size, firstChild.checkpointMessageCount)
@@ -136,17 +132,17 @@ class SqliteContextStateIntegrationTest {
                 responseTimeMs = 20,
             ),
         )
-        factsRepository.apply(FactsUpdate(upsert = listOf(MemoryFact("language", "Kotlin"))))
-        branchService.activeHistory(conversation.messages())
-        branchService.createBranch(emptyList())
+        factsRepository.apply(1, FactsUpdate(upsert = listOf(MemoryFact("language", "Kotlin"))))
+        branchService.activeHistory(1, conversation.messages())
+        branchService.createBranch(1, emptyList())
 
-        ContextStateService(conversationRepository, factsRepository, branchService).reset()
+        ContextStateService(conversationRepository, factsRepository, branchService).reset(1)
 
-        val restoredConversation = SqliteConversationRepository(jdbcTemplate(databasePath)).load()
-        val restoredFacts = SqliteMemoryFactRepository(jdbcTemplate(databasePath)).findAll()
+        val restoredConversation = SqliteConversationRepository(jdbcTemplate(databasePath)).load(1)
+        val restoredFacts = SqliteMemoryFactRepository(jdbcTemplate(databasePath)).findAll(1)
         val restoredBranches = ConversationBranchService(
             SqliteConversationBranchRepository(jdbcTemplate(databasePath)),
-        ).branches()
+        ).branches(1)
         assertTrue(restoredConversation.messages().isEmpty())
         assertEquals(0, restoredConversation.tokenUsage().totalTokens)
         assertNull(restoredConversation.summary())

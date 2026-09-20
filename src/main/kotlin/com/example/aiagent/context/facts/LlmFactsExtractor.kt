@@ -3,19 +3,18 @@ package com.example.aiagent.context.facts
 import com.example.aiagent.agent.ChatMessage
 import com.example.aiagent.agent.Role
 import com.example.aiagent.config.ContextStrategiesProperties
-import com.example.aiagent.llm.InvalidLlmResponseException
 import com.example.aiagent.llm.LlmClientResolver
 import com.example.aiagent.llm.LlmRequest
+import com.example.aiagent.llm.StructuredOutputParser
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
 import org.springframework.stereotype.Component
-import tools.jackson.databind.ObjectMapper
 
 @Component
 class LlmFactsExtractor(
     private val llmClientResolver: LlmClientResolver,
     private val properties: ContextStrategiesProperties,
-    private val jsonMapper: ObjectMapper,
+    private val structuredOutputParser: StructuredOutputParser,
 ) : FactsExtractor {
     override fun extract(
         existingFacts: List<MemoryFact>,
@@ -32,11 +31,11 @@ class LlmFactsExtractor(
                 ),
             ),
         )
-        val parsed = try {
-            jsonMapper.readValue(response.content, FactsUpdateResponse::class.java)
-        } catch (exception: RuntimeException) {
-            throw InvalidLlmResponseException(extractorProperties.provider, exception)
-        }
+        val parsed = structuredOutputParser.parse(
+            response.content,
+            FactsUpdateResponse::class.java,
+            extractorProperties.provider,
+        )
         return FactsUpdate(
             upsert = parsed.upsert.map { fact -> MemoryFact(fact.key.trim(), fact.value.trim()) },
             deleteKeys = parsed.deleteKeys.map(String::trim).filter(String::isNotEmpty),

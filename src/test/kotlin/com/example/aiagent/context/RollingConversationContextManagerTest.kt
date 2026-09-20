@@ -30,7 +30,7 @@ class RollingConversationContextManagerTest {
         assertEquals(conversation.messages(), context)
         assertNull(conversation.summary())
         verify(exactly = 0) { summarizer.summarize(any(), any()) }
-        verify(exactly = 0) { repository.saveSummary(any()) }
+        verify(exactly = 0) { repository.saveSummary(1, any()) }
     }
 
     @Test
@@ -57,7 +57,7 @@ class RollingConversationContextManagerTest {
         assertEquals(messageContents(1..10), summarizedMessages.captured.map(ChatMessage::content))
         assertEquals(expectedSummary, conversation.summary())
         assertEquals(20, conversation.messages().size)
-        verify(exactly = 1) { repository.saveSummary(expectedSummary) }
+        verify(exactly = 1) { repository.saveSummary(1, expectedSummary) }
         assertEquals(
             listOf(
                 ChatMessage(
@@ -84,7 +84,7 @@ class RollingConversationContextManagerTest {
         val expectedSummary = ConversationSummary("Summary v2", 20)
         assertEquals(messageContents(11..20), summarizedMessages.captured.map(ChatMessage::content))
         assertEquals(expectedSummary, conversation.summary())
-        verify(exactly = 1) { repository.saveSummary(expectedSummary) }
+        verify(exactly = 1) { repository.saveSummary(1, expectedSummary) }
         assertEquals(
             listOf(
                 ChatMessage(
@@ -107,7 +107,7 @@ class RollingConversationContextManagerTest {
 
         assertEquals(existingSummary, conversation.summary())
         assertEquals(30, conversation.messages().size)
-        verify(exactly = 0) { repository.saveSummary(any()) }
+        verify(exactly = 0) { repository.saveSummary(1, any()) }
     }
 
     @Test
@@ -115,7 +115,7 @@ class RollingConversationContextManagerTest {
         val existingSummary = ConversationSummary("Summary v1", 10)
         val conversation = conversationWithMessages(30, existingSummary)
         every { summarizer.summarize(any(), any()) } returns "Summary v2"
-        every { repository.saveSummary(any()) } throws IllegalStateException("database unavailable")
+        every { repository.saveSummary(1, any()) } throws IllegalStateException("database unavailable")
         val manager = manager(properties())
 
         manager.compressIfNeeded(conversation)

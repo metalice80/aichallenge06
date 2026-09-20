@@ -40,17 +40,26 @@ class SqliteConversationBranchRepository(
             )
             """.trimIndent(),
         )
-        if (branchCount() == 0) {
-            insertMainBranch()
-        }
+        addTaskIdColumnIfMissing()
+        jdbcTemplate.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversation_branch_task_id ON conversation_branch(task_id, id)",
+        )
+        ensureTaskBranch(1)
     }
 
     @Transactional
-    override fun ensureMainInitialized(seedHistory: List<ChatMessage>) {
+    override fun ensureMainInitialized(taskId: Long, seedHistory: List<ChatMessage>) {
+        ensureTaskBranch(taskId)
         val main = jdbcTemplate.query(
-            "SELECT id, initialized FROM conversation_branch WHERE parent_branch_id IS NULL ORDER BY id LIMIT 1",
-        ) { resultSet, _ -> resultSet.getLong("id") to resultSet.getBoolean("initialized") }
-            .firstOrNull() ?: error("Main branch is missing")
+            """
+            SELECT id, initialized
+            FROM conversation_branch
+            WHERE task_id = ? AND parent_branch_id IS NULL
+            ORDER BY id LIMIT 1
+            """.trimIndent(),
+            { resultSet, _ -> resultSet.getLong("id") to resultSet.getBoolean("initialized") },
+            taskId,
+        ).firstOrNull() ?: error("Main branch is missing for Task $taskId")
         if (main.second) {
             return
         }
@@ -58,48 +67,52 @@ class SqliteConversationBranchRepository(
         jdbcTemplate.update("UPDATE conversation_branch SET initialized = 1 WHERE id = ?", main.first)
     }
 
-    override fun findAll(): List<ConversationBranch> = jdbcTemplate.query(
-        """
-        SELECT id, name, parent_branch_id, checkpoint_message_count, active
-        FROM conversation_branch
-        ORDER BY id
-        """.trimIndent(),
-    ) { resultSet, _ ->
-        ConversationBranch(
-            id = resultSet.getLong("id"),
-            name = resultSet.getString("name"),
-            parentBranchId = resultSet.getLong("parent_branch_id").let { value ->
-                if (resultSet.wasNull()) null else value
+    @Transactional
+    override fun findAll(taskId: Long): List<ConversationBranch> {
+        ensureTaskBranch(taskId)
+        return jdbcTemplate.query(
+            """
+            SELECT id, name, parent_branch_id, checkpoint_message_count, active
+            FROM conversation_branch
+            WHERE task_id = ?
+            ORDER BY id
+            """.trimIndent(),
+            { resultSet, _ ->
+                ConversationBranch(
+                    id = resultSet.getLong("id"),
+                    name = resultSet.getString("name"),
+                    parentBranchId = resultSet.getLong("parent_branch_id").let { value ->
+                        if (resultSet.wasNull()) null else value
+                    },
+                    checkpointMessageCount = resultSet.getInt("checkpoint_message_count"),
+                    active = resultSet.getBoolean("active"),
+                )
             },
-            checkpointMessageCount = resultSet.getInt("checkpoint_message_count"),
-            active = resultSet.getBoolean("active"),
+            taskId,
         )
     }
 
-    override fun activeBranch(): ConversationBranch =
-        findAll().singleOrNull(ConversationBranch::active)
-            ?: error("Exactly one active conversation branch is required")
+    override fun activeBranch(taskId: Long): ConversationBranch =
+        findAll(taskId).singleOrNull(ConversationBranch::active)
+            ?: error("Exactly one active conversation branch is required for Task $taskId")
 
-    override fun effectiveHistory(branchId: Long): List<ChatMessage> =
-        effectiveHistory(branchId, mutableSetOf())
+    override fun effectiveHistory(taskId: Long, branchId: Long): List<ChatMessage> =
+        effectiveHistory(taskId, branchId, mutableSetOf())
 
     @Transactional
-    override fun createFromActive(): ConversationBranch {
-        val parent = activeBranch()
-        val checkpoint = effectiveHistory(parent.id).size
-        val name = "Branch ${branchCount()}"
-        jdbcTemplate.update("UPDATE conversation_branch SET active = 0")
+    override fun createFromActive(taskId: Long): ConversationBranch {
+        val parent = activeBranch(taskId)
+        val checkpoint = effectiveHistory(taskId, parent.id).size
+        val name = "Branch ${branchCount(taskId)}"
+        jdbcTemplate.update("UPDATE conversation_branch SET active = 0 WHERE task_id = ?", taskId)
         jdbcTemplate.update(
             """
             INSERT INTO conversation_branch(
-                name,
-                parent_branch_id,
-                checkpoint_message_count,
-                active,
-                initialized,
-                created_at
-            ) VALUES (?, ?, ?, 1, 1, ?)
+                task_id, name, parent_branch_id, checkpoint_message_count,
+                active, initialized, created_at
+            ) VALUES (?, ?, ?, ?, 1, 1, ?)
             """.trimIndent(),
+            taskId,
             name,
             parent.id,
             checkpoint,
@@ -112,36 +125,46 @@ class SqliteConversationBranchRepository(
     }
 
     @Transactional
-    override fun activate(branchId: Long) {
-        require(branchExists(branchId)) { "Conversation branch $branchId does not exist" }
-        jdbcTemplate.update("UPDATE conversation_branch SET active = 0")
-        jdbcTemplate.update("UPDATE conversation_branch SET active = 1 WHERE id = ?", branchId)
+    override fun activate(taskId: Long, branchId: Long) {
+        require(branchExists(taskId, branchId)) {
+            "Conversation branch $branchId does not exist in Task $taskId"
+        }
+        jdbcTemplate.update("UPDATE conversation_branch SET active = 0 WHERE task_id = ?", taskId)
+        jdbcTemplate.update(
+            "UPDATE conversation_branch SET active = 1 WHERE task_id = ? AND id = ?",
+            taskId,
+            branchId,
+        )
     }
 
     @Transactional
-    override fun appendToActive(messages: List<ChatMessage>) {
+    override fun appendToActive(taskId: Long, messages: List<ChatMessage>) {
         if (messages.isEmpty()) {
             return
         }
-        insertMessages(activeBranch().id, messages)
+        insertMessages(activeBranch(taskId).id, messages)
     }
 
     @Transactional
-    override fun reset() {
-        jdbcTemplate.update("DELETE FROM branch_message")
-        jdbcTemplate.update("DELETE FROM conversation_branch")
-        insertMainBranch()
+    override fun reset(taskId: Long) {
+        jdbcTemplate.update(
+            "DELETE FROM branch_message WHERE branch_id IN (SELECT id FROM conversation_branch WHERE task_id = ?)",
+            taskId,
+        )
+        jdbcTemplate.update("DELETE FROM conversation_branch WHERE task_id = ?", taskId)
+        insertMainBranch(taskId)
     }
 
     private fun effectiveHistory(
+        taskId: Long,
         branchId: Long,
         visited: MutableSet<Long>,
     ): List<ChatMessage> {
         check(visited.add(branchId)) { "Conversation branch ancestry contains a cycle" }
-        val branch = findAll().firstOrNull { it.id == branchId }
-            ?: error("Conversation branch $branchId does not exist")
+        val branch = findAll(taskId).firstOrNull { it.id == branchId }
+            ?: error("Conversation branch $branchId does not exist in Task $taskId")
         val inherited = branch.parentBranchId?.let { parentId ->
-            effectiveHistory(parentId, visited).take(branch.checkpointMessageCount)
+            effectiveHistory(taskId, parentId, visited).take(branch.checkpointMessageCount)
         }.orEmpty()
         return inherited + ownMessages(branchId)
     }
@@ -157,10 +180,7 @@ class SqliteConversationBranchRepository(
         branchId,
     )
 
-    private fun insertMessages(
-        branchId: Long,
-        messages: List<ChatMessage>,
-    ) {
+    private fun insertMessages(branchId: Long, messages: List<ChatMessage>) {
         val firstPosition = jdbcTemplate.queryForObject(
             "SELECT COALESCE(MAX(position) + 1, 0) FROM branch_message WHERE branch_id = ?",
             Int::class.java,
@@ -182,29 +202,46 @@ class SqliteConversationBranchRepository(
         }
     }
 
-    private fun branchCount(): Int =
-        jdbcTemplate.queryForObject("SELECT COUNT(*) FROM conversation_branch", Int::class.java) ?: 0
+    private fun branchCount(taskId: Long): Int = jdbcTemplate.queryForObject(
+        "SELECT COUNT(*) FROM conversation_branch WHERE task_id = ?",
+        Int::class.java,
+        taskId,
+    ) ?: 0
 
-    private fun branchExists(branchId: Long): Boolean =
+    private fun branchExists(taskId: Long, branchId: Long): Boolean =
         jdbcTemplate.queryForObject(
-            "SELECT COUNT(*) FROM conversation_branch WHERE id = ?",
+            "SELECT COUNT(*) FROM conversation_branch WHERE task_id = ? AND id = ?",
             Int::class.java,
+            taskId,
             branchId,
         ) == 1
 
-    private fun insertMainBranch() {
+    private fun ensureTaskBranch(taskId: Long) {
+        if (branchCount(taskId) == 0) {
+            insertMainBranch(taskId)
+        }
+    }
+
+    private fun insertMainBranch(taskId: Long) {
         jdbcTemplate.update(
             """
             INSERT INTO conversation_branch(
-                name,
-                parent_branch_id,
-                checkpoint_message_count,
-                active,
-                initialized,
-                created_at
-            ) VALUES ('Main', NULL, 0, 1, 0, ?)
+                task_id, name, parent_branch_id, checkpoint_message_count,
+                active, initialized, created_at
+            ) VALUES (?, 'Main', NULL, 0, 1, 0, ?)
             """.trimIndent(),
+            taskId,
             Instant.now().toString(),
         )
+    }
+
+    private fun addTaskIdColumnIfMissing() {
+        val columns = jdbcTemplate.queryForList("PRAGMA table_info(conversation_branch)")
+            .mapNotNull { row -> row["name"]?.toString() }
+        if ("task_id" !in columns) {
+            jdbcTemplate.execute(
+                "ALTER TABLE conversation_branch ADD COLUMN task_id INTEGER NOT NULL DEFAULT 1",
+            )
+        }
     }
 }

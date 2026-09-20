@@ -22,32 +22,56 @@ class SqliteMemoryFactRepository(
             )
             """.trimIndent(),
         )
-    }
-
-    override fun findAll(): List<MemoryFact> = jdbcTemplate.query(
-        "SELECT key, value FROM conversation_fact ORDER BY key",
-    ) { resultSet, _ ->
-        MemoryFact(
-            key = resultSet.getString("key"),
-            value = resultSet.getString("value"),
+        jdbcTemplate.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_conversation_fact (
+                task_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(task_id, key)
+            )
+            """.trimIndent(),
+        )
+        jdbcTemplate.update(
+            """
+            INSERT OR IGNORE INTO task_conversation_fact(task_id, key, value, updated_at)
+            SELECT 1, key, value, updated_at FROM conversation_fact
+            """.trimIndent(),
         )
     }
 
+    override fun findAll(taskId: Long): List<MemoryFact> = jdbcTemplate.query(
+        "SELECT key, value FROM task_conversation_fact WHERE task_id = ? ORDER BY key",
+        { resultSet, _ ->
+            MemoryFact(
+                key = resultSet.getString("key"),
+                value = resultSet.getString("value"),
+            )
+        },
+        taskId,
+    )
+
     @Transactional
-    override fun apply(update: FactsUpdate) {
+    override fun apply(taskId: Long, update: FactsUpdate) {
         update.deleteKeys.distinct().forEach { key ->
-            jdbcTemplate.update("DELETE FROM conversation_fact WHERE key = ?", key.trim())
+            jdbcTemplate.update(
+                "DELETE FROM task_conversation_fact WHERE task_id = ? AND key = ?",
+                taskId,
+                key.trim(),
+            )
         }
         val updatedAt = Instant.now().toString()
         update.upsert.forEach { fact ->
             jdbcTemplate.update(
                 """
-                INSERT INTO conversation_fact(key, value, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET
+                INSERT INTO task_conversation_fact(task_id, key, value, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(task_id, key) DO UPDATE SET
                     value = excluded.value,
                     updated_at = excluded.updated_at
                 """.trimIndent(),
+                taskId,
                 fact.key.trim(),
                 fact.value.trim(),
                 updatedAt,
@@ -55,7 +79,7 @@ class SqliteMemoryFactRepository(
         }
     }
 
-    override fun clear() {
-        jdbcTemplate.update("DELETE FROM conversation_fact")
+    override fun clear(taskId: Long) {
+        jdbcTemplate.update("DELETE FROM task_conversation_fact WHERE task_id = ?", taskId)
     }
 }

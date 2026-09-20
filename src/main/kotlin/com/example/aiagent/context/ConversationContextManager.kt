@@ -67,7 +67,7 @@ class RollingConversationContextManager(
             summarizedMessageCount = range.last + 1,
         )
         try {
-            conversationRepository.saveSummary(updatedSummary)
+            conversationRepository.saveSummary(conversation.taskId, updatedSummary)
         } catch (exception: RuntimeException) {
             logger.warn(
                 "Conversation summary persistence failed; summary and compression cursor remain unchanged",

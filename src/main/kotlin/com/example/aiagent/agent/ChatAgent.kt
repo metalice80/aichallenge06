@@ -9,19 +9,27 @@ import com.example.aiagent.context.strategy.ContextStrategyType
 import com.example.aiagent.llm.InvalidLlmResponseException
 import com.example.aiagent.llm.LlmClientResolver
 import com.example.aiagent.llm.LlmRequest
+import com.example.aiagent.memory.MemoryInspector
+import com.example.aiagent.memory.MemoryService
 import com.example.aiagent.persistence.ConversationRepository
+import com.example.aiagent.task.AgentTask
+import com.example.aiagent.task.TaskService
+import com.example.aiagent.task.TaskStatus
 import org.springframework.stereotype.Service
 
 @Service
 class ChatAgent(
     private val llmClientResolver: LlmClientResolver,
-    private val conversation: Conversation,
+    conversation: Conversation,
     private val conversationRepository: ConversationRepository,
     private val properties: LlmProperties,
     private val contextStrategyResolver: ContextStrategyResolver,
     private val contextStateService: ContextStateService,
     private val branchService: ConversationBranchService,
+    private val taskService: TaskService,
+    private val memoryService: MemoryService,
 ) : Agent {
+    private var conversation = conversation
 
     @Synchronized
     override fun sendMessage(request: AgentRequest): AgentResponse {
@@ -39,6 +47,10 @@ class ChatAgent(
         if (model.length > MAX_MODEL_LENGTH) {
             throw InvalidMessageException("Model must not exceed $MAX_MODEL_LENGTH characters")
         }
+        val task = taskService.activeTask()
+        if (task.status == TaskStatus.COMPLETED) {
+            throw InvalidMessageException("Completed Task is read-only")
+        }
 
         val previousMessages = conversation.messages()
         val previousTokenUsage = conversation.tokenUsage()
@@ -46,13 +58,24 @@ class ChatAgent(
         val userMessage = ChatMessage(Role.USER, content)
         val contextStrategy = contextStrategyResolver.resolve(request.contextStrategy)
         val contextPlan = contextStrategy.buildContext(conversation)
+        val memoryContext = memoryService.context(task)
+        val systemPrompt = properties.systemPrompt.trim()
         val llmRequest = LlmRequest(
             model = model,
             messages = buildList {
-                add(ChatMessage(Role.SYSTEM, properties.systemPrompt.trim()))
+                add(ChatMessage(Role.SYSTEM, systemPrompt))
+                addAll(memoryContext.messages)
                 addAll(contextPlan.contextMessages)
                 add(userMessage)
             },
+        )
+        memoryService.recordEffectiveContext(
+            task = task,
+            strategy = request.contextStrategy,
+            systemPrompt = systemPrompt,
+            memoryContext = memoryContext,
+            contextPlan = contextPlan,
+            currentUserMessage = userMessage,
         )
 
         val startedAt = System.nanoTime()
@@ -79,7 +102,8 @@ class ChatAgent(
             conversation.restore(previousMessages, previousTokenUsage, previousSummary)
             throw exception
         }
-        contextStrategy.afterSuccessfulExchange(userMessage, assistantMessage)
+        contextStrategy.afterSuccessfulExchange(conversation, userMessage, assistantMessage)
+        memoryService.extractAfterSuccessfulExchange(task, userMessage)
 
         return AgentResponse(
             provider = request.provider,
@@ -95,10 +119,7 @@ class ChatAgent(
     override fun history(): List<ChatMessage> = conversation.messages()
 
     @Synchronized
-    override fun state(): AgentState = AgentState(
-        messages = conversation.messages(),
-        conversationUsage = conversation.tokenUsage(),
-    )
+    override fun state(): AgentState = currentState()
 
     override fun providers(): List<LlmProviderOption> =
         llmClientResolver.availableClients().map { client ->
@@ -112,23 +133,70 @@ class ChatAgent(
     override fun contextStrategies(): List<ContextStrategyType> =
         contextStrategyResolver.availableTypes()
 
-    override fun branches(): List<ConversationBranch> = branchService.branches()
+    override fun tasks(): List<AgentTask> = taskService.tasks()
+
+    @Synchronized
+    override fun createTask(name: String): AgentState {
+        val task = taskService.create(name)
+        conversation = conversationRepository.load(task.id)
+        return currentState()
+    }
+
+    @Synchronized
+    override fun activateTask(taskId: Long): AgentState {
+        val task = taskService.activate(taskId)
+        conversation = conversationRepository.load(task.id)
+        return currentState()
+    }
+
+    @Synchronized
+    override fun completeTask(taskId: Long): AgentTask = taskService.complete(taskId)
+
+    override fun branches(): List<ConversationBranch> =
+        branchService.branches(conversation.taskId)
 
     @Synchronized
     override fun createBranch(): ConversationBranch =
-        branchService.createBranch(conversation.messages())
+        branchService.createBranch(conversation.taskId, conversation.messages())
 
     @Synchronized
     override fun activateBranch(branchId: Long): AgentState = AgentState(
-        messages = branchService.activateBranch(branchId, conversation.messages()),
+        messages = branchService.activateBranch(
+            conversation.taskId,
+            branchId,
+            conversation.messages(),
+        ),
         conversationUsage = conversation.tokenUsage(),
     )
 
     @Synchronized
+    override fun memory(contextStrategy: ContextStrategyType): MemoryInspector {
+        val effectiveShortTerm = contextStrategyResolver.resolve(contextStrategy)
+            .buildContext(conversation)
+            .contextMessages
+        return memoryService.inspector(conversation.taskId, effectiveShortTerm)
+    }
+
+    @Synchronized
+    override fun clearWorkingMemory() {
+        memoryService.clearWorking(conversation.taskId)
+    }
+
+    @Synchronized
+    override fun clearLongTermMemory() {
+        memoryService.clearLongTerm()
+    }
+
+    @Synchronized
     override fun reset() {
-        contextStateService.reset()
+        contextStateService.reset(conversation.taskId)
         conversation.clear()
     }
+
+    private fun currentState() = AgentState(
+        messages = conversation.messages(),
+        conversationUsage = conversation.tokenUsage(),
+    )
 
     companion object {
         const val MAX_MESSAGE_LENGTH = 4_000

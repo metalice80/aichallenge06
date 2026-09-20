@@ -65,7 +65,7 @@ class ContextStrategyTest {
     @Test
     fun `sticky facts prepends persistent facts and keeps only its recent window`() {
         val factsRepository = mockk<MemoryFactRepository> {
-            every { findAll() } returns listOf(
+            every { findAll(1) } returns listOf(
                 MemoryFact("language", "Kotlin"),
                 MemoryFact("database", "SQLite"),
             )
@@ -99,7 +99,7 @@ class ContextStrategyTest {
             deleteKeys = listOf("obsolete"),
         )
         val factsRepository = mockk<MemoryFactRepository>(relaxed = true) {
-            every { findAll() } returns emptyList()
+            every { findAll(1) } returns emptyList()
         }
         val extractor = mockk<FactsExtractor> {
             every { extract(emptyList(), ChatMessage(Role.USER, "I use Kotlin")) } returns update
@@ -110,19 +110,21 @@ class ContextStrategyTest {
             extractor,
         )
 
+        val conversation = Conversation()
         strategy.afterSuccessfulExchange(
+            conversation,
             ChatMessage(Role.USER, "I use Kotlin"),
             ChatMessage(Role.ASSISTANT, "Noted"),
         )
 
-        verify(exactly = 1) { factsRepository.apply(update) }
+        verify(exactly = 1) { factsRepository.apply(1, update) }
     }
 
     @Test
     fun `sticky facts extraction failure preserves the existing facts`() {
         val existing = listOf(MemoryFact("language", "Kotlin"))
         val factsRepository = mockk<MemoryFactRepository>(relaxed = true) {
-            every { findAll() } returns existing
+            every { findAll(1) } returns existing
         }
         val extractor = mockk<FactsExtractor> {
             every { extract(existing, any()) } throws IllegalStateException("extractor unavailable")
@@ -133,12 +135,14 @@ class ContextStrategyTest {
             extractor,
         )
 
+        val conversation = Conversation()
         strategy.afterSuccessfulExchange(
+            conversation,
             ChatMessage(Role.USER, "New preference"),
             ChatMessage(Role.ASSISTANT, "Noted"),
         )
 
-        verify(exactly = 0) { factsRepository.apply(any()) }
+        verify(exactly = 0) { factsRepository.apply(any(), any()) }
     }
 
     @Test
@@ -146,17 +150,17 @@ class ContextStrategyTest {
         val seedConversation = conversationWithSixMessages()
         val activeHistory = seedConversation.messages().take(4)
         val branchService = mockk<ConversationBranchService>(relaxed = true) {
-            every { activeHistory(seedConversation.messages()) } returns activeHistory
+            every { activeHistory(1, seedConversation.messages()) } returns activeHistory
         }
         val strategy = BranchingContextStrategy(branchService)
         val user = ChatMessage(Role.USER, "Branch question")
         val assistant = ChatMessage(Role.ASSISTANT, "Branch answer")
 
         val context = strategy.buildContext(seedConversation)
-        strategy.afterSuccessfulExchange(user, assistant)
+        strategy.afterSuccessfulExchange(seedConversation, user, assistant)
 
         assertEquals(activeHistory, context.contextMessages)
-        verify(exactly = 1) { branchService.appendToActive(listOf(user, assistant)) }
+        verify(exactly = 1) { branchService.appendToActive(1, listOf(user, assistant)) }
     }
 
     private fun conversationWithSixMessages() = Conversation().apply {

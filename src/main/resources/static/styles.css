@@ -65,6 +65,20 @@ h2 {
     font-size: 1.1rem;
 }
 
+.task-controls {
+    display: grid;
+    grid-template-columns: minmax(240px, 1fr) auto auto;
+    gap: 12px;
+    align-items: end;
+    border-bottom: 1px solid var(--border);
+    padding: 18px 24px;
+    background: var(--surface-muted);
+}
+
+.task-selector {
+    min-width: 0;
+}
+
 .eyebrow {
     margin-bottom: 5px;
     color: var(--muted);
@@ -346,10 +360,96 @@ textarea:disabled {
     font-size: 0.72rem;
 }
 
-.stats-panel {
+.stats-panel,
+.memory-panel {
     margin-top: 18px;
     padding: 22px 24px;
 }
+
+.memory-panel {
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    background: var(--surface);
+    box-shadow: var(--shadow);
+}
+
+.memory-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.memory-tab {
+    cursor: pointer;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 8px 14px;
+    background: var(--surface-muted);
+    color: var(--muted);
+    font-weight: 700;
+}
+
+.memory-tab.active {
+    border-color: var(--accent);
+    background: #e8ecfb;
+    color: var(--accent-dark);
+}
+
+.memory-layer[hidden] {
+    display: none;
+}
+
+.memory-meta,
+.diagnostic-empty {
+    color: var(--muted);
+    font-size: 0.84rem;
+}
+
+.diagnostic-list,
+.diagnostic-block,
+.effective-context {
+    display: grid;
+    gap: 8px;
+}
+
+.diagnostic-row {
+    display: grid;
+    grid-template-columns: minmax(120px, 0.35fr) minmax(0, 1fr);
+    gap: 14px;
+    border-radius: 10px;
+    padding: 10px 12px;
+    background: var(--surface-muted);
+    font-size: 0.85rem;
+}
+
+.diagnostic-row strong {
+    color: var(--accent-dark);
+    overflow-wrap: anywhere;
+}
+
+.diagnostic-row span {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.diagnostic-section-title {
+    margin: 12px 0 2px;
+    color: var(--muted);
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+}
+
+.diagnostic-text {
+    margin: 0;
+    border-radius: 10px;
+    padding: 12px;
+    background: var(--surface-muted);
+    font: inherit;
+    font-size: 0.85rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
 
 .stats-heading {
     display: flex;
@@ -439,7 +539,8 @@ textarea:disabled {
     }
 
     .chat-panel,
-    .stats-panel {
+    .stats-panel,
+    .memory-panel {
         border-radius: 15px;
     }
 
@@ -449,8 +550,28 @@ textarea:disabled {
         padding: 16px;
     }
 
-    .branch-controls {
+    .branch-controls,
+    .task-controls {
         grid-template-columns: 1fr;
+    }
+
+    .task-controls {
+        padding: 16px;
+    }
+
+    .stats-heading {
+        align-items: stretch;
+        flex-direction: column;
+        gap: 12px;
+    }
+
+    .memory-tabs {
+        overflow-x: auto;
+    }
+
+    .diagnostic-row {
+        grid-template-columns: 1fr;
+        gap: 4px;
     }
 
     .chat-history {

@@ -12,16 +12,20 @@ class BranchingContextStrategy(
     override val type = ContextStrategyType.BRANCHING
 
     override fun buildContext(conversation: Conversation): ContextPlan {
-        val history = branchService.activeHistory(conversation.messages())
+        val history = branchService.activeHistory(conversation.taskId, conversation.messages())
         return ContextPlan(
             contextMessages = history,
         )
     }
 
     override fun afterSuccessfulExchange(
+        conversation: Conversation,
         userMessage: ChatMessage,
         assistantMessage: ChatMessage,
     ) {
-        branchService.appendToActive(listOf(userMessage, assistantMessage))
+        branchService.appendToActive(
+            conversation.taskId,
+            listOf(userMessage, assistantMessage),
+        )
     }
 }

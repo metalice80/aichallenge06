@@ -19,6 +19,7 @@ interface ContextStrategy {
     fun buildContext(conversation: Conversation): ContextPlan
 
     fun afterSuccessfulExchange(
+        conversation: Conversation,
         userMessage: ChatMessage,
         assistantMessage: ChatMessage,
     ) = Unit

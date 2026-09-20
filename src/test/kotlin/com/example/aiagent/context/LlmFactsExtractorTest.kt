@@ -15,6 +15,7 @@ import com.example.aiagent.llm.LlmProvider
 import com.example.aiagent.llm.LlmRequest
 import com.example.aiagent.llm.LlmResponse
 import com.example.aiagent.llm.TokenUsage
+import com.example.aiagent.llm.StructuredOutputParser
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
@@ -38,7 +39,11 @@ class LlmFactsExtractorTest {
             ),
         ),
     )
-    private val extractor = LlmFactsExtractor(resolver, properties, jacksonObjectMapper())
+    private val extractor = LlmFactsExtractor(
+        resolver,
+        properties,
+        StructuredOutputParser(jacksonObjectMapper()),
+    )
 
     @Test
     fun `extractor uses its configured provider model prompt and maps upserts and deletes`() {

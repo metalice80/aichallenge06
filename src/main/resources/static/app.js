@@ -5,20 +5,32 @@ const messageInput = document.querySelector('#message-input');
 const providerSelect = document.querySelector('#provider-select');
 const modelInput = document.querySelector('#model-input');
 const contextStrategySelect = document.querySelector('#context-strategy-select');
+const taskSelect = document.querySelector('#task-select');
+const createTaskButton = document.querySelector('#create-task-button');
+const completeTaskButton = document.querySelector('#complete-task-button');
 const branchControls = document.querySelector('#branch-controls');
 const branchSelect = document.querySelector('#branch-select');
 const createBranchButton = document.querySelector('#create-branch-button');
 const sendButton = document.querySelector('#send-button');
 const resetButton = document.querySelector('#reset-button');
+const clearWorkingButton = document.querySelector('#clear-working-button');
+const clearLongTermButton = document.querySelector('#clear-long-term-button');
 const loadingMessage = document.querySelector('#loading-message');
 const errorMessage = document.querySelector('#error-message');
 const statsPanel = document.querySelector('#stats-panel');
+const shortTermMeta = document.querySelector('#short-term-meta');
+const shortTermMemory = document.querySelector('#short-term-memory');
+const workingMemory = document.querySelector('#working-memory');
+const longTermMemory = document.querySelector('#long-term-memory');
+const lastMemoryUpdate = document.querySelector('#last-memory-update');
+const effectiveContext = document.querySelector('#effective-context');
 
 let busy = false;
+let activeTaskStatus = 'ACTIVE';
 
 chatForm.addEventListener('submit', async (event) => {
     event.preventDefault();
-    if (busy) return;
+    if (busy || activeTaskStatus === 'COMPLETED') return;
 
     const message = messageInput.value.trim();
     if (!message) {
@@ -66,6 +78,7 @@ chatForm.addEventListener('submit', async (event) => {
 
         appendMessage('agent', 'Агент', payload.content);
         updateStats(payload);
+        await loadMemory();
     } catch (error) {
         userElement.remove();
         restoreEmptyStateIfNeeded();
@@ -79,16 +92,12 @@ chatForm.addEventListener('submit', async (event) => {
 
 resetButton.addEventListener('click', async () => {
     if (busy) return;
-
-    clearError();
-    setBusy(true);
-    try {
+    await runAction(async () => {
         const response = await fetch('/api/chat/reset', { method: 'POST' });
         if (!response.ok) {
             const payload = await readJson(response);
             throw new Error(payload?.message || 'Не удалось сбросить чат.');
         }
-
         chatHistory.replaceChildren(emptyState);
         emptyState.hidden = false;
         resetCurrentStats();
@@ -96,12 +105,77 @@ resetButton.addEventListener('click', async () => {
         statsPanel.hidden = false;
         messageInput.value = '';
         await loadBranches();
-    } catch (error) {
-        showError(error instanceof Error ? error.message : 'Не удалось сбросить чат.');
-    } finally {
-        setBusy(false);
-        messageInput.focus();
-    }
+        await loadMemory();
+    }, 'Не удалось сбросить чат.');
+});
+
+clearWorkingButton.addEventListener('click', async () => {
+    if (busy || !window.confirm('Очистить рабочую память активной Task?')) return;
+    await runAction(async () => {
+        await postNoContent('/api/chat/memory/working/clear', 'Не удалось очистить рабочую память.');
+        await loadMemory();
+    }, 'Не удалось очистить рабочую память.');
+});
+
+clearLongTermButton.addEventListener('click', async () => {
+    if (busy || !window.confirm('Очистить глобальную долговременную память для всех Tasks?')) return;
+    await runAction(async () => {
+        await postNoContent('/api/chat/memory/long-term/clear', 'Не удалось очистить долговременную память.');
+        await loadMemory();
+    }, 'Не удалось очистить долговременную память.');
+});
+
+createTaskButton.addEventListener('click', async () => {
+    if (busy) return;
+    const name = window.prompt('Название новой задачи:')?.trim();
+    if (!name) return;
+    await runAction(async () => {
+        const response = await fetch('/api/chat/tasks', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name }),
+        });
+        const payload = await readJson(response);
+        if (!response.ok) {
+            throw new Error(payload?.message || 'Не удалось создать задачу.');
+        }
+        renderChatState(payload);
+        await loadTasks();
+        await loadBranches();
+        await loadMemory();
+    }, 'Не удалось создать задачу.');
+});
+
+completeTaskButton.addEventListener('click', async () => {
+    if (busy || !taskSelect.value || activeTaskStatus === 'COMPLETED') return;
+    if (!window.confirm('Завершить активную задачу? История и память сохранятся.')) return;
+    await runAction(async () => {
+        const response = await fetch(`/api/chat/tasks/${encodeURIComponent(taskSelect.value)}/complete`, {
+            method: 'POST',
+        });
+        const payload = await readJson(response);
+        if (!response.ok) {
+            throw new Error(payload?.message || 'Не удалось завершить задачу.');
+        }
+        await loadTasks();
+    }, 'Не удалось завершить задачу.');
+});
+
+taskSelect.addEventListener('change', async () => {
+    if (busy || !taskSelect.value) return;
+    await runAction(async () => {
+        const response = await fetch(`/api/chat/tasks/${encodeURIComponent(taskSelect.value)}/activate`, {
+            method: 'POST',
+        });
+        const payload = await readJson(response);
+        if (!response.ok) {
+            throw new Error(payload?.message || 'Не удалось переключить задачу.');
+        }
+        renderChatState(payload);
+        await loadTasks();
+        await loadBranches();
+        await loadMemory();
+    }, 'Не удалось переключить задачу.');
 });
 
 messageInput.addEventListener('keydown', (event) => {
@@ -110,6 +184,7 @@ messageInput.addEventListener('keydown', (event) => {
         chatForm.requestSubmit();
     }
 });
+
 providerSelect.addEventListener('change', () => {
     const option = providerSelect.selectedOptions[0];
     modelInput.value = option?.dataset.defaultModel || '';
@@ -117,10 +192,8 @@ providerSelect.addEventListener('change', () => {
 
 contextStrategySelect.addEventListener('change', async () => {
     if (busy) return;
-    clearError();
-    updateBranchControls();
-    setBusy(true);
-    try {
+    await runAction(async () => {
+        updateBranchControls();
         if (contextStrategySelect.value === 'BRANCHING') {
             await loadBranches();
             const activeBranchId = branchSelect.value;
@@ -130,32 +203,22 @@ contextStrategySelect.addEventListener('change', async () => {
         } else {
             await loadState();
         }
-    } catch (error) {
-        showError(error instanceof Error ? error.message : 'Не удалось переключить context strategy.');
-    } finally {
-        setBusy(false);
-    }
+        await loadMemory();
+    }, 'Не удалось переключить context strategy.');
 });
 
 branchSelect.addEventListener('change', async () => {
     if (busy || !branchSelect.value) return;
-    clearError();
-    setBusy(true);
-    try {
+    await runAction(async () => {
         await activateBranch(branchSelect.value);
         await loadBranches();
-    } catch (error) {
-        showError(error instanceof Error ? error.message : 'Не удалось переключить ветку.');
-    } finally {
-        setBusy(false);
-    }
+        await loadMemory();
+    }, 'Не удалось переключить ветку.');
 });
 
 createBranchButton.addEventListener('click', async () => {
     if (busy) return;
-    clearError();
-    setBusy(true);
-    try {
+    await runAction(async () => {
         const response = await fetch('/api/chat/branches', { method: 'POST' });
         const payload = await readJson(response);
         if (!response.ok || typeof payload?.id !== 'number') {
@@ -163,12 +226,21 @@ createBranchButton.addEventListener('click', async () => {
         }
         await loadBranches();
         await activateBranch(payload.id);
-    } catch (error) {
-        showError(error instanceof Error ? error.message : 'Не удалось создать ветку.');
-    } finally {
-        setBusy(false);
-        messageInput.focus();
-    }
+        await loadMemory();
+    }, 'Не удалось создать ветку.');
+});
+
+document.querySelectorAll('[data-memory-tab]').forEach((button) => {
+    button.addEventListener('click', () => {
+        document.querySelectorAll('[data-memory-tab]').forEach((tab) => {
+            tab.classList.toggle('active', tab === button);
+        });
+        document.querySelectorAll('[data-memory-layer]').forEach((layer) => {
+            const active = layer.dataset.memoryLayer === button.dataset.memoryTab;
+            layer.hidden = !active;
+            layer.classList.toggle('active', active);
+        });
+    });
 });
 
 void initialize();
@@ -179,8 +251,10 @@ async function initialize() {
     try {
         await loadProviders();
         await loadContextStrategies();
+        await loadTasks();
         await loadState();
         await loadBranches();
+        await loadMemory();
     } catch (error) {
         showError(error instanceof Error ? error.message : 'Не удалось загрузить настройки чата.');
     } finally {
@@ -195,24 +269,19 @@ async function loadProviders() {
     if (!response.ok || !Array.isArray(payload)) {
         throw new Error(payload?.message || 'Не удалось загрузить список providers.');
     }
-
     providerSelect.replaceChildren();
     payload.forEach((provider) => {
         if (
             typeof provider?.provider !== 'string'
             || typeof provider?.displayName !== 'string'
             || typeof provider?.defaultModel !== 'string'
-        ) {
-            return;
-        }
-
+        ) return;
         const option = document.createElement('option');
         option.value = provider.provider;
         option.textContent = provider.displayName;
         option.dataset.defaultModel = provider.defaultModel;
         providerSelect.append(option);
     });
-
     if (!providerSelect.options.length) {
         throw new Error('Сервер не настроил ни одного LLM provider.');
     }
@@ -228,12 +297,9 @@ async function loadContextStrategies() {
     if (!response.ok || !Array.isArray(payload)) {
         throw new Error(payload?.message || 'Не удалось загрузить context strategies.');
     }
-
     contextStrategySelect.replaceChildren();
     payload.forEach((strategy) => {
-        if (typeof strategy?.type !== 'string' || typeof strategy?.displayName !== 'string') {
-            return;
-        }
+        if (typeof strategy?.type !== 'string' || typeof strategy?.displayName !== 'string') return;
         const option = document.createElement('option');
         option.value = strategy.type;
         option.textContent = strategy.displayName;
@@ -248,18 +314,40 @@ async function loadContextStrategies() {
     updateBranchControls();
 }
 
+async function loadTasks() {
+    const response = await fetch('/api/chat/tasks');
+    const payload = await readJson(response);
+    if (!response.ok || !Array.isArray(payload)) {
+        throw new Error(payload?.message || 'Не удалось загрузить задачи.');
+    }
+    taskSelect.replaceChildren();
+    payload.forEach((task) => {
+        if (typeof task?.id !== 'number' || typeof task?.name !== 'string') return;
+        const option = document.createElement('option');
+        option.value = String(task.id);
+        option.textContent = task.status === 'COMPLETED' ? `${task.name} (завершена)` : task.name;
+        option.dataset.selected = String(task.selected === true);
+        option.dataset.status = task.status;
+        taskSelect.append(option);
+    });
+    const selected = Array.from(taskSelect.options).find((option) => option.dataset.selected === 'true');
+    if (!selected) {
+        throw new Error('Сервер не выбрал активную Task.');
+    }
+    taskSelect.value = selected.value;
+    activeTaskStatus = selected.dataset.status || 'ACTIVE';
+    updateTaskControls();
+}
+
 async function loadBranches() {
     const response = await fetch('/api/chat/branches');
     const payload = await readJson(response);
     if (!response.ok || !Array.isArray(payload)) {
         throw new Error(payload?.message || 'Не удалось загрузить ветки.');
     }
-
     branchSelect.replaceChildren();
     payload.forEach((branch) => {
-        if (typeof branch?.id !== 'number' || typeof branch?.name !== 'string') {
-            return;
-        }
+        if (typeof branch?.id !== 'number' || typeof branch?.name !== 'string') return;
         const option = document.createElement('option');
         option.value = String(branch.id);
         option.textContent = branch.name;
@@ -268,9 +356,7 @@ async function loadBranches() {
     });
     const activeOption = Array.from(branchSelect.options)
         .find((option) => option.dataset.active === 'true');
-    if (activeOption) {
-        branchSelect.value = activeOption.value;
-    }
+    if (activeOption) branchSelect.value = activeOption.value;
     updateBranchControls();
 }
 
@@ -289,6 +375,15 @@ function updateBranchControls() {
     branchControls.hidden = contextStrategySelect.value !== 'BRANCHING';
 }
 
+function updateTaskControls() {
+    const completed = activeTaskStatus === 'COMPLETED';
+    completeTaskButton.disabled = busy || completed;
+    messageInput.placeholder = completed
+        ? 'Завершённая задача доступна только для просмотра'
+        : 'Введите сообщение...';
+    messageInput.disabled = busy || completed;
+    sendButton.disabled = busy || completed;
+}
 
 async function loadState() {
     const response = await fetch('/api/chat/state');
@@ -317,23 +412,153 @@ function renderChatState(payload) {
     statsPanel.hidden = false;
 }
 
+async function loadMemory() {
+    const strategy = contextStrategySelect.value || 'SLIDING_WINDOW';
+    const response = await fetch(`/api/chat/memory?contextStrategy=${encodeURIComponent(strategy)}`);
+    const payload = await readJson(response);
+    if (!response.ok) {
+        throw new Error(payload?.message || 'Не удалось загрузить Memory Inspector.');
+    }
+    renderMemory(payload);
+}
+
+function renderMemory(payload) {
+    const shortTerm = Array.isArray(payload?.shortTerm) ? payload.shortTerm : [];
+    shortTermMeta.textContent = `Strategy: ${payload?.strategy || '—'} · ${shortTerm.length} messages in effective context`;
+    renderMessages(shortTermMemory, shortTerm);
+    renderEntries(workingMemory, payload?.working, 'Рабочая память активной Task пуста.');
+    renderEntries(longTermMemory, payload?.longTerm, 'Долговременная память пуста.');
+    renderLastUpdate(payload?.lastUpdate);
+    renderEffectiveContext(payload?.effectiveContext);
+}
+
+function renderMessages(container, messages) {
+    container.replaceChildren();
+    if (!messages.length) {
+        container.append(diagnosticEmpty('Effective Short-Term пуст.'));
+        return;
+    }
+    messages.forEach((message) => {
+        container.append(diagnosticRow(message.role || '—', message.content || ''));
+    });
+}
+
+function renderEntries(container, entries, emptyText) {
+    container.replaceChildren();
+    const values = Array.isArray(entries) ? entries : [];
+    if (!values.length) {
+        container.append(diagnosticEmpty(emptyText));
+        return;
+    }
+    values.forEach((entry) => container.append(diagnosticRow(entry.key, entry.value)));
+}
+
+function renderLastUpdate(update) {
+    lastMemoryUpdate.replaceChildren();
+    if (!update) {
+        lastMemoryUpdate.append(diagnosticEmpty('Изменений пока нет.'));
+        return;
+    }
+    lastMemoryUpdate.append(diagnosticSection('SHORT-TERM'));
+    lastMemoryUpdate.append(diagnosticRow('+ USER', update.userMessage || ''));
+    renderChanges(lastMemoryUpdate, 'WORKING', update.working);
+    renderChanges(lastMemoryUpdate, 'LONG-TERM', update.longTerm);
+    if (update.error) {
+        lastMemoryUpdate.append(diagnosticRow('Ошибка extractor', update.error));
+    }
+}
+
+function renderChanges(container, title, changes) {
+    container.append(diagnosticSection(title));
+    const values = Array.isArray(changes) ? changes : [];
+    if (!values.length) {
+        container.append(diagnosticEmpty('Без изменений.'));
+        return;
+    }
+    values.forEach((change) => {
+        const symbol = change.type === 'ADDED' ? '+' : change.type === 'UPDATED' ? '~' : '-';
+        const value = change.type === 'UPDATED'
+            ? `${change.oldValue ?? '—'} → ${change.newValue ?? '—'}`
+            : change.type === 'DELETED' ? change.oldValue : change.newValue;
+        container.append(diagnosticRow(`${symbol} ${change.key}`, value || ''));
+    });
+}
+
+function renderEffectiveContext(context) {
+    effectiveContext.replaceChildren();
+    if (!context) {
+        effectiveContext.append(diagnosticEmpty('Контекст ещё не формировался.'));
+        return;
+    }
+    effectiveContext.append(diagnosticSection('SYSTEM PROMPT'));
+    effectiveContext.append(diagnosticText(context.systemPrompt || ''));
+    effectiveContext.append(diagnosticSection('LONG-TERM MEMORY'));
+    appendContextEntries(effectiveContext, context.longTermMemory);
+    effectiveContext.append(diagnosticSection('WORKING MEMORY'));
+    appendContextEntries(effectiveContext, context.workingMemory);
+    effectiveContext.append(diagnosticSection(`EFFECTIVE SHORT-TERM · ${context.strategy}`));
+    const shortTerm = Array.isArray(context.shortTerm) ? context.shortTerm : [];
+    if (!shortTerm.length) effectiveContext.append(diagnosticEmpty('(empty)'));
+    shortTerm.forEach((message) => {
+        effectiveContext.append(diagnosticRow(message.role || '—', message.content || ''));
+    });
+    effectiveContext.append(diagnosticSection('CURRENT USER MESSAGE'));
+    effectiveContext.append(diagnosticRow('USER', context.currentUserMessage?.content || ''));
+}
+
+function appendContextEntries(container, entries) {
+    const values = Array.isArray(entries) ? entries : [];
+    if (!values.length) {
+        container.append(diagnosticEmpty('(empty)'));
+        return;
+    }
+    values.forEach((entry) => container.append(diagnosticRow(entry.key, entry.value)));
+}
+
+function diagnosticRow(label, value) {
+    const row = document.createElement('div');
+    row.className = 'diagnostic-row';
+    const key = document.createElement('strong');
+    key.textContent = label;
+    const content = document.createElement('span');
+    content.textContent = value;
+    row.append(key, content);
+    return row;
+}
+
+function diagnosticSection(title) {
+    const heading = document.createElement('h4');
+    heading.className = 'diagnostic-section-title';
+    heading.textContent = title;
+    return heading;
+}
+
+function diagnosticEmpty(text) {
+    const element = document.createElement('p');
+    element.className = 'diagnostic-empty';
+    element.textContent = text;
+    return element;
+}
+
+function diagnosticText(text) {
+    const element = document.createElement('pre');
+    element.className = 'diagnostic-text';
+    element.textContent = text;
+    return element;
+}
+
 function appendMessage(role, label, content) {
     emptyState.hidden = true;
-
     const wrapper = document.createElement('article');
     wrapper.className = `message message-${role}`;
-
     const card = document.createElement('div');
     card.className = 'message-card';
-
     const author = document.createElement('p');
     author.className = 'message-label';
     author.textContent = label;
-
     const text = document.createElement('p');
     text.className = 'message-content';
     text.textContent = content;
-
     card.append(author, text);
     wrapper.append(card);
     chatHistory.append(wrapper);
@@ -354,7 +579,6 @@ function updateStats(payload) {
     document.querySelector('#current-total-tokens-stat').textContent =
         formatTokenCount(payload.currentUsage?.totalTokens);
     updateConversationStats(payload.conversationUsage);
-
     const milliseconds = Number(payload.responseTimeMs);
     document.querySelector('#response-time').textContent = Number.isFinite(milliseconds)
         ? `${(milliseconds / 1000).toFixed(2)} сек`
@@ -387,16 +611,40 @@ function formatTokenCount(value, fallback = '—') {
 
 function setBusy(value) {
     busy = value;
-    messageInput.disabled = value;
-    sendButton.disabled = value;
-    resetButton.disabled = value;
     providerSelect.disabled = value;
     modelInput.disabled = value;
     contextStrategySelect.disabled = value;
+    taskSelect.disabled = value;
+    createTaskButton.disabled = value;
     branchSelect.disabled = value;
     createBranchButton.disabled = value;
+    resetButton.disabled = value;
+    clearWorkingButton.disabled = value;
+    clearLongTermButton.disabled = value;
     loadingMessage.hidden = !value;
     chatHistory.setAttribute('aria-busy', String(value));
+    updateTaskControls();
+}
+
+async function runAction(action, fallbackMessage) {
+    clearError();
+    setBusy(true);
+    try {
+        await action();
+    } catch (error) {
+        showError(error instanceof Error ? error.message : fallbackMessage);
+    } finally {
+        setBusy(false);
+        messageInput.focus();
+    }
+}
+
+async function postNoContent(url, fallbackMessage) {
+    const response = await fetch(url, { method: 'POST' });
+    if (!response.ok) {
+        const payload = await readJson(response);
+        throw new Error(payload?.message || fallbackMessage);
+    }
 }
 
 function showError(message) {
@@ -410,9 +658,7 @@ function clearError() {
 }
 
 function restoreEmptyStateIfNeeded() {
-    if (!chatHistory.querySelector('.message')) {
-        emptyState.hidden = false;
-    }
+    if (!chatHistory.querySelector('.message')) emptyState.hidden = false;
 }
 
 function valueOrDash(value) {

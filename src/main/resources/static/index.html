@@ -18,6 +18,20 @@
     </header>
 
     <section class="chat-panel" aria-label="Диалог">
+        <div class="task-controls" aria-label="Активная задача">
+            <label class="provider-field task-selector" for="task-select">
+                <span>Task</span>
+                <select id="task-select" name="task">
+                    <option value="">Загрузка...</option>
+                </select>
+            </label>
+            <button id="create-task-button" class="button button-secondary" type="button">
+                + Новая задача
+            </button>
+            <button id="complete-task-button" class="button button-secondary" type="button">
+                Завершить задачу
+            </button>
+        </div>
         <div class="provider-controls" aria-label="Настройки модели">
             <label class="provider-field" for="provider-select">
                 <span>Provider</span>
@@ -82,6 +96,9 @@
                 required
             ></textarea>
             <div class="composer-actions">
+                <button id="clear-working-button" class="button button-secondary" type="button">
+                    Очистить рабочую память
+                </button>
                 <button id="reset-button" class="button button-secondary" type="button">Сбросить чат</button>
                 <button id="send-button" class="button button-primary" type="submit">Отправить</button>
             </div>
@@ -122,6 +139,46 @@
                 <div><dt>Выходные токены</dt><dd id="conversation-output-tokens-stat">0</dd></div>
                 <div><dt>Всего токенов</dt><dd id="conversation-total-tokens-stat">0</dd></div>
             </dl>
+        </section>
+    </aside>
+
+    <aside id="memory-panel" class="memory-panel" aria-labelledby="memory-title">
+        <div class="stats-heading">
+            <div>
+                <p class="eyebrow">Диагностика контекста</p>
+                <h2 id="memory-title">Memory Inspector</h2>
+            </div>
+            <button id="clear-long-term-button" class="button button-secondary" type="button">
+                Очистить долговременную память
+            </button>
+        </div>
+
+        <div class="memory-tabs" role="tablist" aria-label="Memory layers">
+            <button class="memory-tab active" type="button" data-memory-tab="short-term">Short-Term</button>
+            <button class="memory-tab" type="button" data-memory-tab="working">Working</button>
+            <button class="memory-tab" type="button" data-memory-tab="long-term">Long-Term</button>
+        </div>
+        <section class="memory-layer active" data-memory-layer="short-term">
+            <p id="short-term-meta" class="memory-meta">—</p>
+            <div id="short-term-memory" class="diagnostic-list"></div>
+        </section>
+        <section class="memory-layer" data-memory-layer="working" hidden>
+            <div id="working-memory" class="diagnostic-list"></div>
+        </section>
+        <section class="memory-layer" data-memory-layer="long-term" hidden>
+            <div id="long-term-memory" class="diagnostic-list"></div>
+        </section>
+
+        <div class="stats-divider" aria-hidden="true"></div>
+        <section aria-labelledby="last-memory-update-title">
+            <h3 id="last-memory-update-title">Last Memory Update</h3>
+            <div id="last-memory-update" class="diagnostic-block">Изменений пока нет.</div>
+        </section>
+
+        <div class="stats-divider" aria-hidden="true"></div>
+        <section aria-labelledby="effective-context-title">
+            <h3 id="effective-context-title">Effective Context</h3>
+            <div id="effective-context" class="effective-context">Контекст ещё не формировался.</div>
         </section>
     </aside>
 </main>

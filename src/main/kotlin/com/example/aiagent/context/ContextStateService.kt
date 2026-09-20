@@ -13,9 +13,9 @@ class ContextStateService(
     private val branchService: ConversationBranchService,
 ) {
     @Transactional
-    fun reset() {
-        conversationRepository.clear()
-        factsRepository.clear()
-        branchService.reset()
+    fun reset(taskId: Long) {
+        conversationRepository.clear(taskId)
+        factsRepository.clear(taskId)
+        branchService.reset(taskId)
     }
 }

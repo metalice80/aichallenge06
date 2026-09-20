@@ -5,11 +5,11 @@ import com.example.aiagent.agent.ConversationSummary
 import com.example.aiagent.agent.LlmRequestUsage
 
 interface ConversationRepository {
-    fun load(): Conversation
+    fun load(taskId: Long): Conversation
 
     fun save(conversation: Conversation)
     fun save(conversation: Conversation, requestUsage: LlmRequestUsage)
-    fun saveSummary(summary: ConversationSummary)
+    fun saveSummary(taskId: Long, summary: ConversationSummary)
 
-    fun clear()
+    fun clear(taskId: Long)
 }
