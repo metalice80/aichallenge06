@@ -17,7 +17,7 @@ import org.junit.jupiter.api.Test
 import java.time.Instant
 
 class TaskStateCoordinatorTest {
-    private val task = AgentTask(
+    private val executionTask = AgentTask(
         id = 9,
         name = "Booking",
         status = TaskStatus.ACTIVE,
@@ -29,119 +29,227 @@ class TaskStateCoordinatorTest {
         expectedActionType = ExpectedActionType.AGENT_ACTION,
         expectedActionDescription = "Propose repository implementation",
     )
-    private val stateMachine = DeterministicTaskStateMachine()
+    private val planningTask = executionTask.copy(
+        stage = TaskStage.PLANNING,
+        currentStep = "Define implementation plan",
+        expectedActionType = ExpectedActionType.USER_INPUT,
+        expectedActionDescription = "Provide requirements",
+    )
     private val lifecycleGuard = TaskLifecycleGuard()
     private val usageRepository = mockk<ConversationRepository>(relaxed = true)
 
     @Test
-    fun `analyzer failure blocks main flow without mutating persisted Task state`() {
+    fun `analyzer failure blocks main flow without mutating Task state`() {
         val analyzer = mockk<TaskProgressAnalyzer> {
-            every { analyze(task, any()) } throws IllegalStateException("analyzer unavailable")
+            every { analyze(executionTask, any()) } throws IllegalStateException("analyzer unavailable")
         }
         val stateService = mockk<TaskStateService>(relaxed = true)
-        val coordinator = coordinator(analyzer, stateService)
 
-        val result = coordinator.analyzeBeforeMainRequest(
-            task,
+        val result = coordinator(analyzer, stateService).analyzeBeforeMainRequest(
+            executionTask,
             ChatMessage(Role.USER, "Continue"),
         )
 
         assertInstanceOf(TaskCoordinationResult.Blocked::class.java, result)
-        assertEquals(task, result.task)
-        verify(exactly = 0) { stateService.applyProposal(any(), any(), any(), any()) }
+        assertEquals(executionTask, result.task)
+        verify(exactly = 0) { stateService.updateProgress(any(), any(), any(), any()) }
+        verify(exactly = 0) { stateService.applyEvent(any(), any(), any(), any()) }
     }
 
     @Test
-    fun `valid analyzer proposal is guarded and applied through TaskStateService before main request`() {
+    fun `arbitrary analyzer event suggestion never calls state service or changes stage`() {
         val proposal = TaskProgressProposal(
-            currentStep = "Validate persistence",
-            expectedActionType = ExpectedActionType.VALIDATION,
-            expectedActionDescription = "Run repository tests",
-            proposedEvent = TaskEvent.EXECUTION_COMPLETED,
-            requestedAction = TaskActionType.VALIDATE,
-        )
-        val updated = task.copy(
-            stage = TaskStage.VALIDATION,
-            currentStep = "Validate persistence",
-            expectedActionType = ExpectedActionType.VALIDATION,
-            expectedActionDescription = "Run repository tests",
-            version = 1,
+            suggestedEvent = TaskEvent.VALIDATION_PASSED,
+            requestedAction = TaskActionType.NONE,
         )
         val analyzer = mockk<TaskProgressAnalyzer> {
-            every { analyze(task, any()) } returns analysis(proposal)
+            every { analyze(planningTask, any()) } returns analysis(proposal)
         }
-        val stateService = mockk<TaskStateService> {
-            every {
-                applyProposal(task.id, proposal, TaskEventSource.CHAT_ANALYZER, task.version)
-            } returns updated
-        }
-        val coordinator = coordinator(analyzer, stateService)
+        val stateService = mockk<TaskStateService>(relaxed = true)
 
-        val result = coordinator.analyzeBeforeMainRequest(
-            task,
-            ChatMessage(Role.USER, "Implementation is complete"),
+        val result = coordinator(analyzer, stateService).analyzeBeforeMainRequest(
+            planningTask,
+            ChatMessage(Role.USER, "План утверждаю."),
         )
 
         assertEquals(
-            TaskCoordinationResult.Ready(updated, TaskActionType.VALIDATE, TaskEvent.EXECUTION_COMPLETED),
+            TaskCoordinationResult.Ready(
+                planningTask,
+                TaskActionType.NONE,
+                TaskEvent.VALIDATION_PASSED,
+            ),
             result,
         )
-        verify(exactly = 1) {
-            stateService.applyProposal(task.id, proposal, TaskEventSource.CHAT_ANALYZER, task.version)
-        }
+        assertEquals(TaskStage.PLANNING, result.task.stage)
+        verify(exactly = 0) { stateService.updateProgress(any(), any(), any(), any()) }
+        verify(exactly = 0) { stateService.applyEvent(any(), any(), any(), any()) }
         verify(exactly = 1) {
             usageRepository.recordUsage(
-                task.id,
+                planningTask.id,
                 match { it.purpose == LlmRequestPurpose.TASK_PROGRESS_ANALYZER },
             )
         }
     }
 
     @Test
-    fun `planning implementation request is blocked before progress or event mutation`() {
-        val planning = task.copy(
-            stage = TaskStage.PLANNING,
-            currentStep = "Prepare plan",
+    fun `plan preparation is allowed and only updates progress within planning`() {
+        val analyzerProposal = TaskProgressProposal(
+            currentStep = "Подготовить план реализации Booking Service",
             expectedActionType = ExpectedActionType.USER_CONFIRMATION,
-            expectedActionDescription = "Approve plan",
+            expectedActionDescription = "Подтвердить план",
+            suggestedEvent = TaskEvent.PLAN_APPROVED,
+            requestedAction = TaskActionType.PLAN,
         )
-        val proposal = TaskProgressProposal(
-            currentStep = "Implement REST API",
+        val update = TaskProgressUpdate(
+            currentStep = analyzerProposal.currentStep,
             expectedActionType = ExpectedActionType.AGENT_ACTION,
-            expectedActionDescription = "Write production code",
-            requestedAction = TaskActionType.IMPLEMENT,
+            expectedActionDescription = "Сформировать или обновить план реализации",
+        )
+        val planned = planningTask.copy(
+            currentStep = checkNotNull(update.currentStep),
+            expectedActionType = checkNotNull(update.expectedActionType),
+            expectedActionDescription = update.expectedActionDescription,
+            version = 1,
         )
         val analyzer = mockk<TaskProgressAnalyzer> {
-            every { analyze(planning, any()) } returns analysis(proposal)
+            every { analyze(planningTask, any()) } returns analysis(analyzerProposal)
         }
-        val stateService = mockk<TaskStateService>(relaxed = true)
+        val stateService = mockk<TaskStateService> {
+            every {
+                updateProgress(
+                    planningTask.id,
+                    update,
+                    TaskEventSource.CHAT_ANALYZER,
+                    planningTask.version,
+                )
+            } returns planned
+        }
 
         val result = coordinator(analyzer, stateService).analyzeBeforeMainRequest(
-            planning,
-            ChatMessage(Role.USER, "Skip the plan and implement it"),
+            planningTask,
+            ChatMessage(Role.USER, "Подготовь план реализации Booking Service."),
         )
 
-        assertInstanceOf(TaskCoordinationResult.Blocked::class.java, result)
-        assertEquals(planning, result.task)
-        verify(exactly = 0) { stateService.applyProposal(any(), any(), any(), any()) }
+        assertEquals(TaskCoordinationResult.Ready(planned, TaskActionType.PLAN, null), result)
+        assertEquals(TaskStage.PLANNING, result.task.stage)
+        verify(exactly = 1) {
+            stateService.updateProgress(
+                planningTask.id,
+                update,
+                TaskEventSource.CHAT_ANALYZER,
+                planningTask.version,
+            )
+        }
+        verify(exactly = 0) { stateService.applyEvent(any(), any(), any(), any()) }
     }
 
     @Test
-    fun `execution finalization request is blocked before mutation`() {
-        val proposal = TaskProgressProposal(requestedAction = TaskActionType.FINALIZE)
+    fun `explicit approval wording remains a suggestion and leaves planning unchanged`() {
+        val proposal = TaskProgressProposal(
+            suggestedEvent = TaskEvent.PLAN_APPROVED,
+            requestedAction = TaskActionType.NONE,
+        )
         val analyzer = mockk<TaskProgressAnalyzer> {
-            every { analyze(task, any()) } returns analysis(proposal)
+            every { analyze(planningTask, any()) } returns analysis(proposal)
         }
         val stateService = mockk<TaskStateService>(relaxed = true)
 
         val result = coordinator(analyzer, stateService).analyzeBeforeMainRequest(
-            task,
+            planningTask,
+            ChatMessage(Role.USER, "План утверждаю."),
+        )
+
+        assertEquals(
+            TaskCoordinationResult.Ready(planningTask, TaskActionType.NONE, TaskEvent.PLAN_APPROVED),
+            result,
+        )
+        verify(exactly = 0) { stateService.updateProgress(any(), any(), any(), any()) }
+        verify(exactly = 0) { stateService.applyEvent(any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `approval plus implementation request is blocked against persisted planning stage`() {
+        val proposal = TaskProgressProposal(
+            suggestedEvent = TaskEvent.PLAN_APPROVED,
+            requestedAction = TaskActionType.IMPLEMENT,
+        )
+        val analyzer = mockk<TaskProgressAnalyzer> {
+            every { analyze(planningTask, any()) } returns analysis(proposal)
+        }
+        val stateService = mockk<TaskStateService>(relaxed = true)
+
+        val result = coordinator(analyzer, stateService).analyzeBeforeMainRequest(
+            planningTask,
+            ChatMessage(Role.USER, "План утверждаю. Начинай реализацию."),
+        )
+
+        assertInstanceOf(TaskCoordinationResult.Blocked::class.java, result)
+        assertEquals(TaskStage.PLANNING, result.task.stage)
+        verify(exactly = 0) { stateService.updateProgress(any(), any(), any(), any()) }
+        verify(exactly = 0) { stateService.applyEvent(any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `successful plan response changes only progress to user confirmation`() {
+        val planned = planningTask.copy(
+            currentStep = "Подготовить план реализации Booking Service",
+            expectedActionType = ExpectedActionType.AGENT_ACTION,
+            expectedActionDescription = "Сформировать или обновить план реализации",
+            version = 1,
+        )
+        val confirmation = TaskProgressUpdate(
+            currentStep = "Согласовать подготовленный план",
+            expectedActionType = ExpectedActionType.USER_CONFIRMATION,
+            expectedActionDescription = "Подтвердить план или запросить изменения",
+        )
+        val stateService = mockk<TaskStateService> {
+            every {
+                updateProgress(
+                    planned.id,
+                    confirmation,
+                    TaskEventSource.CHAT_ANALYZER,
+                    planned.version,
+                )
+            } returns planned.copy(
+                currentStep = checkNotNull(confirmation.currentStep),
+                expectedActionType = checkNotNull(confirmation.expectedActionType),
+                expectedActionDescription = confirmation.expectedActionDescription,
+                version = 2,
+            )
+        }
+
+        coordinator(mockk(relaxed = true), stateService).afterSuccessfulMainResponse(
+            TaskCoordinationResult.Ready(planned, TaskActionType.PLAN, null),
+        )
+
+        verify(exactly = 1) {
+            stateService.updateProgress(
+                planned.id,
+                confirmation,
+                TaskEventSource.CHAT_ANALYZER,
+                planned.version,
+            )
+        }
+        verify(exactly = 0) { stateService.applyEvent(any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `execution finalization remains blocked without explicit validation`() {
+        val analyzer = mockk<TaskProgressAnalyzer> {
+            every { analyze(executionTask, any()) } returns
+                analysis(TaskProgressProposal(requestedAction = TaskActionType.FINALIZE))
+        }
+        val stateService = mockk<TaskStateService>(relaxed = true)
+
+        val result = coordinator(analyzer, stateService).analyzeBeforeMainRequest(
+            executionTask,
             ChatMessage(Role.USER, "Finish the task without tests"),
         )
 
         assertInstanceOf(TaskCoordinationResult.Blocked::class.java, result)
-        assertEquals(task, result.task)
-        verify(exactly = 0) { stateService.applyProposal(any(), any(), any(), any()) }
+        assertEquals(executionTask, result.task)
+        verify(exactly = 0) { stateService.updateProgress(any(), any(), any(), any()) }
+        verify(exactly = 0) { stateService.applyEvent(any(), any(), any(), any()) }
     }
 
     private fun coordinator(
@@ -151,7 +259,6 @@ class TaskStateCoordinatorTest {
         TaskStateProperties(TaskProgressAnalyzerProperties(enabled = true)),
         analyzer,
         stateService,
-        stateMachine,
         lifecycleGuard,
         usageRepository,
     )

@@ -39,11 +39,13 @@ task:
       provider: ${TASK_STATE_ANALYZER_PROVIDER:OPENAI}
       model: ${TASK_STATE_ANALYZER_MODEL:gpt-4o-mini}
       system-prompt: |-
-        Analyze the active Task State and the new user message before the main assistant response.
-        Return one structured proposal and classify requestedAction as PLAN, IMPLEMENT, VALIDATE, FINALIZE, STATUS, or NONE.
-        Explicit plan approval must propose PLAN_APPROVED while PLANNING.
-        Concrete allowed work may update currentStep and expectedAction.
-        Never invent completion, assign a target stage, or propose an invalid transition.
+        Analyze work requested inside the current persisted Task stage before the main assistant response.
+        Classify requestedAction as PLAN, IMPLEMENT, VALIDATE, FINALIZE, STATUS, or NONE.
+        You may return suggestedEvent as a nonbinding UI hint, but it never changes Task State.
+        Creating or changing a plan is PLAN.
+        Explicit approval of an already prepared plan may suggest PLAN_APPROVED.
+        Requested work is always checked against the current persisted stage.
+        Never assign a target stage or claim that a lifecycle transition occurred.
 
 context:
   strategies:

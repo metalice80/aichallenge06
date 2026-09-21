@@ -41,3 +41,13 @@ kotlin {
 tasks.withType<Test> {
     useJUnitPlatform()
 }
+
+val frontendTest = tasks.register<Exec>("frontendTest") {
+    group = "verification"
+    description = "Runs dependency-free frontend behavior tests with Node.js"
+    commandLine("node", "--test", "src/test/js/task-controls.test.mjs")
+}
+
+tasks.named("check") {
+    dependsOn(frontendTest)
+}

@@ -212,10 +212,11 @@ data class TaskResponse(
     val expectedActionType: ExpectedActionType,
     val expectedActionDescription: String?,
     val paused: Boolean,
+    val allowedEvents: Set<TaskEvent>,
     val version: Long,
 ) {
     companion object {
-        fun from(task: AgentTask) = TaskResponse(
+        fun from(task: AgentTask, allowedEvents: Set<TaskEvent>) = TaskResponse(
             id = task.id,
             name = task.name,
             status = task.status,
@@ -227,6 +228,7 @@ data class TaskResponse(
             expectedActionType = task.expectedActionType,
             expectedActionDescription = task.expectedActionDescription,
             paused = task.paused,
+            allowedEvents = allowedEvents,
             version = task.version,
         )
     }
@@ -267,15 +269,17 @@ data class TaskStateResponse(
     val currentStep: String,
     val expectedAction: ExpectedActionResponse,
     val paused: Boolean,
+    val allowedEvents: Set<TaskEvent>,
     val version: Long,
 ) {
     companion object {
-        fun from(task: AgentTask) = TaskStateResponse(
+        fun from(task: AgentTask, allowedEvents: Set<TaskEvent>) = TaskStateResponse(
             taskId = task.id,
             stage = task.stage,
             currentStep = task.currentStep,
             expectedAction = ExpectedActionResponse(task.expectedActionType, task.expectedActionDescription),
             paused = task.paused,
+            allowedEvents = allowedEvents,
             version = task.version,
         )
     }
@@ -435,5 +439,6 @@ data class ApiError(
     val message: String,
     val currentStage: TaskStage? = null,
     val event: TaskEvent? = null,
+    val allowedEvents: Set<TaskEvent>? = null,
     val version: Long? = null,
 )

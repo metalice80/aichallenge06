@@ -1,3 +1,5 @@
+import { deriveTaskEventControls } from './task-controls.mjs';
+
 const chatForm = document.querySelector('#chat-form');
 const chatHistory = document.querySelector('#chat-history');
 const emptyState = document.querySelector('#empty-state');
@@ -785,18 +787,15 @@ function updateBranchControls() {
 function updateTaskControls() {
     const completed = activeTask?.status === 'COMPLETED' || activeTask?.stage === 'DONE';
     const paused = activeTask?.paused === true;
-    const transitionsEnabled = !busy && !completed && !paused && Boolean(activeTask);
-    const planning = transitionsEnabled && activeTask.stage === 'PLANNING';
-    const execution = transitionsEnabled && activeTask.stage === 'EXECUTION';
-    const validation = transitionsEnabled && activeTask.stage === 'VALIDATION';
-    approvePlanButton.hidden = !planning;
-    approvePlanButton.disabled = !planning;
-    completeExecutionButton.hidden = !execution;
-    completeExecutionButton.disabled = !execution;
-    validationPassedButton.hidden = !validation;
-    validationPassedButton.disabled = !validation;
-    validationFailedButton.hidden = !validation;
-    validationFailedButton.disabled = !validation;
+    const eventControls = deriveTaskEventControls(activeTask, busy);
+    approvePlanButton.hidden = eventControls.PLAN_APPROVED.hidden;
+    approvePlanButton.disabled = eventControls.PLAN_APPROVED.disabled;
+    completeExecutionButton.hidden = eventControls.EXECUTION_COMPLETED.hidden;
+    completeExecutionButton.disabled = eventControls.EXECUTION_COMPLETED.disabled;
+    validationPassedButton.hidden = eventControls.VALIDATION_PASSED.hidden;
+    validationPassedButton.disabled = eventControls.VALIDATION_PASSED.disabled;
+    validationFailedButton.hidden = eventControls.VALIDATION_FAILED.hidden;
+    validationFailedButton.disabled = eventControls.VALIDATION_FAILED.disabled;
     pauseTaskButton.hidden = completed || paused || !activeTask;
     pauseTaskButton.disabled = busy || completed || paused;
     resumeTaskButton.hidden = !paused || completed;
@@ -836,7 +835,8 @@ function renderTaskState(task) {
 }
 
 async function applyTaskEvent(event) {
-    if (busy || !activeTask || activeTask.paused || activeTask.stage === 'DONE') return;
+    const allowedEvents = Array.isArray(activeTask?.allowedEvents) ? activeTask.allowedEvents : [];
+    if (busy || !activeTask || !allowedEvents.includes(event)) return;
     await runAction(async () => {
         const response = await fetch(
             `/api/tasks/${encodeURIComponent(activeTask.id)}/events`,
@@ -921,6 +921,7 @@ function applyReturnedTaskState(state) {
         expectedActionType: state.expectedAction?.type,
         expectedActionDescription: state.expectedAction?.description ?? null,
         paused: state.paused === true,
+        allowedEvents: Array.isArray(state.allowedEvents) ? state.allowedEvents : [],
         version: state.version,
         status: state.stage === 'DONE' ? 'COMPLETED' : 'ACTIVE',
     };

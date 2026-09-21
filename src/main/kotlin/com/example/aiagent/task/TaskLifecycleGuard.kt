@@ -5,36 +5,14 @@ import org.springframework.stereotype.Component
 @Component
 class TaskLifecycleGuard {
     fun evaluate(
-        currentStage: TaskStage,
-        effectiveStage: TaskStage,
+        stage: TaskStage,
         requestedAction: TaskActionType,
-        acceptedEvent: TaskEvent? = null,
-    ): LifecycleGuardDecision {
-        val allowed = when (effectiveStage) {
-            TaskStage.PLANNING -> requestedAction in setOf(
-                TaskActionType.PLAN,
-                TaskActionType.STATUS,
-                TaskActionType.NONE,
-            )
-            TaskStage.EXECUTION -> requestedAction in setOf(
-                TaskActionType.IMPLEMENT,
-                TaskActionType.STATUS,
-                TaskActionType.NONE,
-            )
-            TaskStage.VALIDATION -> requestedAction in setOf(
-                TaskActionType.VALIDATE,
-                TaskActionType.STATUS,
-                TaskActionType.NONE,
-            )
-            TaskStage.DONE -> requestedAction in setOf(TaskActionType.STATUS, TaskActionType.NONE) ||
-                (acceptedEvent == TaskEvent.VALIDATION_PASSED && requestedAction == TaskActionType.FINALIZE)
-        }
-        return if (allowed) {
+    ): LifecycleGuardDecision =
+        if (requestedAction in ALLOWED_ACTIONS.getValue(stage)) {
             LifecycleGuardDecision.Allowed
         } else {
-            LifecycleGuardDecision.Blocked(blockedMessage(currentStage, requestedAction))
+            LifecycleGuardDecision.Blocked(blockedMessage(stage, requestedAction))
         }
-    }
 
     fun pausedMessage(task: AgentTask): String =
         "Task приостановлена. Текущий этап: ${task.stage}. " +
@@ -42,32 +20,47 @@ class TaskLifecycleGuard {
 
     fun analyzerFailureMessage(task: AgentTask): String =
         "Не удалось безопасно определить допустимость действия. Текущий этап: ${task.stage}. " +
-            "Состояние Task не изменено. Повторите запрос или используйте явный lifecycle control для события ${nextEvent(task.stage)}."
+            "Состояние Task не изменено. Повторите запрос; переходы доступны только через явные UI/API controls."
 
-    fun invalidTransitionMessage(task: AgentTask, event: TaskEvent): String =
-        "Событие $event недопустимо. Текущий этап: ${task.stage}. " +
-            "Состояние Task не изменено. Следующее допустимое событие: ${nextEvent(task.stage)}."
 
     private fun blockedMessage(stage: TaskStage, action: TaskActionType): String = when (stage) {
         TaskStage.PLANNING ->
             "Действие $action пока не может быть выполнено. Текущий этап: PLANNING. " +
-                "Сначала подготовьте и явно утвердите план событием PLAN_APPROVED."
+                "Сначала подготовьте план; реализация доступна только после явного подтверждения перехода."
         TaskStage.EXECUTION ->
             "Действие $action пока не может быть выполнено. Текущий этап: EXECUTION. " +
-                "Завершите реализацию, примените EXECUTION_COMPLETED и выполните validation до финализации."
+                "Завершите реализацию и явно перейдите к validation до финализации."
         TaskStage.VALIDATION ->
             "Действие $action пока не может быть выполнено. Текущий этап: VALIDATION. " +
-                "Выполните проверки и примените VALIDATION_PASSED либо VALIDATION_FAILED."
+                "Выполните проверки и явно зафиксируйте их результат."
         TaskStage.DONE ->
             "Действие $action недопустимо. Текущий этап: DONE. " +
                 "Завершённая Task доступна только для чтения статуса и итогового summary."
     }
 
-    private fun nextEvent(stage: TaskStage): String = when (stage) {
-        TaskStage.PLANNING -> TaskEvent.PLAN_APPROVED.name
-        TaskStage.EXECUTION -> TaskEvent.EXECUTION_COMPLETED.name
-        TaskStage.VALIDATION -> "${TaskEvent.VALIDATION_PASSED.name} или ${TaskEvent.VALIDATION_FAILED.name}"
-        TaskStage.DONE -> "нет — DONE является terminal state"
+
+    companion object {
+        private val ALLOWED_ACTIONS = mapOf(
+            TaskStage.PLANNING to setOf(
+                TaskActionType.PLAN,
+                TaskActionType.STATUS,
+                TaskActionType.NONE,
+            ),
+            TaskStage.EXECUTION to setOf(
+                TaskActionType.IMPLEMENT,
+                TaskActionType.STATUS,
+                TaskActionType.NONE,
+            ),
+            TaskStage.VALIDATION to setOf(
+                TaskActionType.VALIDATE,
+                TaskActionType.STATUS,
+                TaskActionType.NONE,
+            ),
+            TaskStage.DONE to setOf(
+                TaskActionType.STATUS,
+                TaskActionType.NONE,
+            ),
+        )
     }
 }
 

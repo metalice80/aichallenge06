@@ -23,10 +23,11 @@ data class TaskProgressAnalyzerProperties(
 ) {
     companion object {
         const val DEFAULT_SYSTEM_PROMPT =
-            "Analyze the active Task State and the new user message before the main assistant response. " +
-                "Return one structured proposal and classify requestedAction as PLAN, IMPLEMENT, VALIDATE, " +
-                "FINALIZE, STATUS, or NONE. Explicit plan approval must propose PLAN_APPROVED while PLANNING. " +
-                "Concrete allowed work may update currentStep and expectedAction. Never invent completion, " +
-                "never assign a target stage, and never propose an invalid transition."
+            "Analyze work requested inside the current persisted Task stage before the main assistant response. " +
+                "Classify requestedAction as PLAN, IMPLEMENT, VALIDATE, FINALIZE, STATUS, or NONE. " +
+                "You may return suggestedEvent as a nonbinding UI hint, but it never changes stage and must never " +
+                "be treated as applied. Creating or changing a plan is PLAN. Explicit approval of an already " +
+                "prepared plan may suggest PLAN_APPROVED, while requested work is still checked against the current " +
+                "persisted stage. Never assign a target stage or claim that a lifecycle transition occurred."
     }
 }

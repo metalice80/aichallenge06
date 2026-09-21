@@ -38,6 +38,17 @@ class TaskProgressAnalyzerException(
     val responseTimeMs: Long,
 ) : RuntimeException("Task progress analyzer response could not be parsed", cause)
 
+private fun TaskProgressProposal.normalizePlanningSemantics(task: AgentTask): TaskProgressProposal {
+    if (task.stage != TaskStage.PLANNING || requestedAction != TaskActionType.PLAN) {
+        return this
+    }
+    return copy(
+        expectedActionType = ExpectedActionType.AGENT_ACTION,
+        expectedActionDescription = "Сформировать или обновить план реализации",
+        suggestedEvent = null,
+    )
+}
+
 @Component
 class LlmTaskProgressAnalyzer(
     private val llmClientResolver: LlmClientResolver,
@@ -76,15 +87,16 @@ class LlmTaskProgressAnalyzer(
                 responseTimeMs,
             )
         }
+        val proposal = TaskProgressProposal(
+            currentStep = parsed.currentStep?.trim()?.takeIf(String::isNotEmpty),
+            expectedActionType = parsed.expectedActionType,
+            expectedActionDescription = parsed.expectedActionDescription?.trim()?.takeIf(String::isNotEmpty),
+            suggestedEvent = parsed.suggestedEvent,
+            requestedAction = parsed.requestedAction,
+            reason = parsed.reason?.trim()?.takeIf(String::isNotEmpty),
+        ).normalizePlanningSemantics(task)
         return TaskProgressAnalysis(
-            proposal = TaskProgressProposal(
-                currentStep = parsed.currentStep?.trim()?.takeIf(String::isNotEmpty),
-                expectedActionType = parsed.expectedActionType,
-                expectedActionDescription = parsed.expectedActionDescription?.trim()?.takeIf(String::isNotEmpty),
-                proposedEvent = parsed.proposedEvent,
-                requestedAction = parsed.requestedAction,
-                reason = parsed.reason?.trim()?.takeIf(String::isNotEmpty),
-            ),
+            proposal = proposal,
             provider = analyzer.provider,
             model = response.model,
             usage = response.usage,
@@ -108,26 +120,31 @@ class LlmTaskProgressAnalyzer(
         appendLine("New user message:")
         appendLine(userMessage.content)
         appendLine()
-        appendLine("Allowed transitions:")
+        appendLine("Reference transition table (suggestions only; never apply events):")
         appendLine("PLANNING + PLAN_APPROVED -> EXECUTION")
         appendLine("EXECUTION + EXECUTION_COMPLETED -> VALIDATION")
         appendLine("VALIDATION + VALIDATION_PASSED -> DONE")
         appendLine("VALIDATION + VALIDATION_FAILED -> EXECUTION")
         appendLine()
         appendLine("Rules:")
-        appendLine("- Propose at most one event and only when the message clearly confirms that fact.")
+        appendLine("- TaskStage.PLANNING, TaskActionType.PLAN, and TaskEvent.PLAN_APPROVED are different concepts.")
+        appendLine("- Classify creating or changing a plan as PLAN. For PLAN in PLANNING, suggestedEvent must be null.")
+        appendLine("- For PLAN, use expectedActionType AGENT_ACTION because the main assistant must produce the plan now.")
+        appendLine("- PLAN_APPROVED may be suggested only when the user explicitly approves an already prepared plan.")
+        appendLine("- suggestedEvent is a nonbinding UI hint: never assume that it changes Task State.")
+        appendLine("- Classify requestedAction using the current persisted stage; do not use a suggested stage.")
+        appendLine("- Propose at most one suggestion and only when the message clearly confirms that fact.")
         appendLine("- Classify requestedAction as PLAN, IMPLEMENT, VALIDATE, FINALIZE, STATUS, or NONE.")
         appendLine("- Requests to write or change production artifacts are IMPLEMENT, not PLAN.")
         appendLine("- Requests to declare the Task complete are FINALIZE.")
-        appendLine("- Explicit plan approval must propose PLAN_APPROVED while in PLANNING.")
         appendLine("- A concrete allowed work item may update currentStep and expected action.")
-        appendLine("- Keep currentStep concrete; use null for every state field that should remain unchanged.")
-        appendLine("- Never propose an event that is invalid for the current stage.")
+        appendLine("- Keep currentStep concrete; use null for every progress field that should remain unchanged.")
+        appendLine("- Never claim that suggestedEvent was applied; only explicit UI/API events change stage.")
         append(
             "Return only JSON: {\"currentStep\":string|null," +
                 "\"expectedActionType\":\"USER_INPUT|USER_CONFIRMATION|AGENT_ACTION|VALIDATION|NONE\"|null," +
                 "\"expectedActionDescription\":string|null," +
-                "\"proposedEvent\":\"PLAN_APPROVED|EXECUTION_COMPLETED|VALIDATION_PASSED|VALIDATION_FAILED\"|null," +
+                "\"suggestedEvent\":\"PLAN_APPROVED|EXECUTION_COMPLETED|VALIDATION_PASSED|VALIDATION_FAILED\"|null," +
                 "\"requestedAction\":\"PLAN|IMPLEMENT|VALIDATE|FINALIZE|STATUS|NONE\"," +
                 "\"reason\":string|null}.",
         )
@@ -143,7 +160,6 @@ class TaskStateCoordinator(
     private val properties: TaskStateProperties,
     private val analyzer: TaskProgressAnalyzer,
     private val stateService: TaskStateService,
-    private val stateMachine: TaskStateMachine,
     private val lifecycleGuard: TaskLifecycleGuard,
     private val conversationRepository: ConversationRepository,
 ) {
@@ -171,51 +187,33 @@ class TaskStateCoordinator(
             return TaskCoordinationResult.Blocked(task, lifecycleGuard.analyzerFailureMessage(task))
         }
 
-        val proposal = analysis.proposal
+        val proposal = analysis.proposal.normalizePlanningSemantics(task)
         val requestedAction = proposal.requestedAction ?: TaskActionType.NONE
-        val effectiveStage = try {
-            proposal.proposedEvent?.let { stateMachine.transition(task.stage, it) } ?: task.stage
-        } catch (_: InvalidTaskTransitionException) {
-            return TaskCoordinationResult.Blocked(
-                task,
-                lifecycleGuard.invalidTransitionMessage(task, checkNotNull(proposal.proposedEvent)),
-            )
-        }
-        when (
-            val decision = lifecycleGuard.evaluate(
-                currentStage = task.stage,
-                effectiveStage = effectiveStage,
-                requestedAction = requestedAction,
-                acceptedEvent = proposal.proposedEvent,
-            )
-        ) {
+        when (val decision = lifecycleGuard.evaluate(task.stage, requestedAction)) {
             is LifecycleGuardDecision.Blocked ->
                 return TaskCoordinationResult.Blocked(task, decision.message)
             LifecycleGuardDecision.Allowed -> Unit
         }
 
-        val hasStateMutation = proposal.proposedEvent != null ||
-            proposal.currentStep != null ||
-            proposal.expectedActionType != null ||
-            proposal.expectedActionDescription != null
-        if (!hasStateMutation || task.stage == TaskStage.DONE) {
-            return TaskCoordinationResult.Ready(task, requestedAction, proposal.proposedEvent)
+        val update = TaskProgressUpdate(
+            currentStep = proposal.currentStep,
+            expectedActionType = proposal.expectedActionType,
+            expectedActionDescription = proposal.expectedActionDescription,
+        )
+        val hasProgressMutation = update.currentStep != null ||
+            update.expectedActionType != null ||
+            update.expectedActionDescription != null
+        if (!hasProgressMutation || task.stage == TaskStage.DONE) {
+            return TaskCoordinationResult.Ready(task, requestedAction, proposal.suggestedEvent)
         }
-
         return try {
-            val updated = stateService.applyProposal(
+            val updated = stateService.updateProgress(
                 task.id,
-                proposal,
+                update,
                 TaskEventSource.CHAT_ANALYZER,
                 task.version,
             )
-            TaskCoordinationResult.Ready(updated, requestedAction, proposal.proposedEvent)
-        } catch (exception: InvalidTaskTransitionException) {
-            val actual = stateService.state(task.id)
-            TaskCoordinationResult.Blocked(
-                actual,
-                lifecycleGuard.invalidTransitionMessage(actual, exception.event),
-            )
+            TaskCoordinationResult.Ready(updated, requestedAction, proposal.suggestedEvent)
         } catch (exception: TaskStateConflictException) {
             val actual = stateService.state(task.id)
             TaskCoordinationResult.Blocked(
@@ -230,6 +228,25 @@ class TaskStateCoordinator(
                 "${exception.message}. Текущий этап: ${actual.stage}. Состояние Task не изменено.",
             )
         }
+    }
+
+    fun afterSuccessfulMainResponse(coordination: TaskCoordinationResult.Ready) {
+        if (
+            coordination.task.stage != TaskStage.PLANNING ||
+            coordination.requestedAction != TaskActionType.PLAN
+        ) {
+            return
+        }
+        stateService.updateProgress(
+            taskId = coordination.task.id,
+            update = TaskProgressUpdate(
+                currentStep = "Согласовать подготовленный план",
+                expectedActionType = ExpectedActionType.USER_CONFIRMATION,
+                expectedActionDescription = "Подтвердить план или запросить изменения",
+            ),
+            source = TaskEventSource.CHAT_ANALYZER,
+            expectedVersion = coordination.task.version,
+        )
     }
 
     private fun recordUsage(taskId: Long, analysis: TaskProgressAnalysis) {
@@ -269,7 +286,7 @@ sealed interface TaskCoordinationResult {
     data class Ready(
         override val task: AgentTask,
         val requestedAction: TaskActionType,
-        val appliedEvent: TaskEvent?,
+        val suggestedEvent: TaskEvent?,
     ) : TaskCoordinationResult
 
     data class Blocked(
@@ -283,7 +300,7 @@ internal data class TaskProgressProposalResponse(
     val currentStep: String? = null,
     val expectedActionType: ExpectedActionType? = null,
     val expectedActionDescription: String? = null,
-    val proposedEvent: TaskEvent? = null,
+    val suggestedEvent: TaskEvent? = null,
     val requestedAction: TaskActionType? = null,
     val reason: String? = null,
 )

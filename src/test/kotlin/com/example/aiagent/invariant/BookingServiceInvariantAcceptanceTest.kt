@@ -285,7 +285,7 @@ class BookingServiceInvariantAcceptanceTest {
                 taskAnalyzerCalls.incrementAndGet()
                 response(
                     request,
-                    """{"currentStep":"Design booking endpoint","expectedActionType":"AGENT_ACTION","expectedActionDescription":"Implement endpoint","proposedEvent":null}""",
+                    """{"currentStep":"Design booking endpoint","expectedActionType":"AGENT_ACTION","expectedActionDescription":"Implement endpoint","suggestedEvent":null}""",
                 )
             }
             "memory-test" -> {

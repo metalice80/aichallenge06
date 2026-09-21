@@ -65,6 +65,7 @@ class ApiExceptionHandler {
         code = "INVALID_TASK_TRANSITION",
         currentStage = exception.currentStage,
         event = exception.event,
+        allowedEvents = exception.allowedEvents,
     )
 
     @ExceptionHandler(TaskNotFoundException::class)
@@ -175,7 +176,10 @@ class ApiExceptionHandler {
         code: String = status.name,
         currentStage: com.example.aiagent.task.TaskStage? = null,
         event: com.example.aiagent.task.TaskEvent? = null,
+        allowedEvents: Set<com.example.aiagent.task.TaskEvent>? = null,
         version: Long? = null,
     ): ResponseEntity<ApiError> =
-        ResponseEntity.status(status).body(ApiError(code, message, currentStage, event, version))
+        ResponseEntity.status(status).body(
+            ApiError(code, message, currentStage, event, allowedEvents, version),
+        )
 }

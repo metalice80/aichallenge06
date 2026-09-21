@@ -8,74 +8,42 @@ class TaskLifecycleGuardTest {
     private val guard = TaskLifecycleGuard()
 
     @Test
-    fun `implementation is blocked in planning with actionable explanation`() {
-        val decision = guard.evaluate(
-            currentStage = TaskStage.PLANNING,
-            effectiveStage = TaskStage.PLANNING,
-            requestedAction = TaskActionType.IMPLEMENT,
+    fun `work permissions depend only on current persisted stage`() {
+        val allowed = mapOf(
+            TaskStage.PLANNING to setOf(TaskActionType.PLAN, TaskActionType.STATUS, TaskActionType.NONE),
+            TaskStage.EXECUTION to setOf(TaskActionType.IMPLEMENT, TaskActionType.STATUS, TaskActionType.NONE),
+            TaskStage.VALIDATION to setOf(TaskActionType.VALIDATE, TaskActionType.STATUS, TaskActionType.NONE),
+            TaskStage.DONE to setOf(TaskActionType.STATUS, TaskActionType.NONE),
         )
+
+        TaskStage.entries.forEach { stage ->
+            TaskActionType.entries.forEach { action ->
+                val decision = guard.evaluate(stage, action)
+                val expectedType = if (action in allowed.getValue(stage)) {
+                    LifecycleGuardDecision.Allowed::class.java
+                } else {
+                    LifecycleGuardDecision.Blocked::class.java
+                }
+                assertInstanceOf(expectedType, decision, "$stage + $action")
+            }
+        }
+    }
+
+    @Test
+    fun `planning implementation is blocked with actionable explanation`() {
+        val decision = guard.evaluate(TaskStage.PLANNING, TaskActionType.IMPLEMENT)
 
         val blocked = assertInstanceOf(LifecycleGuardDecision.Blocked::class.java, decision)
         assertTrue(blocked.message.contains("PLANNING"))
-        assertTrue(blocked.message.contains("PLAN_APPROVED"))
+        assertTrue(blocked.message.contains("явного подтверждения"))
     }
 
     @Test
-    fun `finalization is blocked in execution until validation`() {
-        val decision = guard.evaluate(
-            currentStage = TaskStage.EXECUTION,
-            effectiveStage = TaskStage.EXECUTION,
-            requestedAction = TaskActionType.FINALIZE,
-        )
+    fun `execution finalization is blocked until explicit validation`() {
+        val decision = guard.evaluate(TaskStage.EXECUTION, TaskActionType.FINALIZE)
 
         val blocked = assertInstanceOf(LifecycleGuardDecision.Blocked::class.java, decision)
         assertTrue(blocked.message.contains("EXECUTION"))
-        assertTrue(blocked.message.contains("VALIDATION", ignoreCase = true))
-    }
-
-    @Test
-    fun `validation action is allowed only in validation stage`() {
-        assertInstanceOf(
-            LifecycleGuardDecision.Allowed::class.java,
-            guard.evaluate(TaskStage.VALIDATION, TaskStage.VALIDATION, TaskActionType.VALIDATE),
-        )
-        assertInstanceOf(
-            LifecycleGuardDecision.Blocked::class.java,
-            guard.evaluate(TaskStage.PLANNING, TaskStage.PLANNING, TaskActionType.VALIDATE),
-        )
-    }
-
-    @Test
-    fun `done permits status but blocks new implementation`() {
-        assertInstanceOf(
-            LifecycleGuardDecision.Allowed::class.java,
-            guard.evaluate(TaskStage.DONE, TaskStage.DONE, TaskActionType.STATUS),
-        )
-        assertInstanceOf(
-            LifecycleGuardDecision.Blocked::class.java,
-            guard.evaluate(TaskStage.DONE, TaskStage.DONE, TaskActionType.IMPLEMENT),
-        )
-    }
-
-    @Test
-    fun `accepted transitions authorize action in their effective stage`() {
-        assertInstanceOf(
-            LifecycleGuardDecision.Allowed::class.java,
-            guard.evaluate(
-                TaskStage.PLANNING,
-                TaskStage.EXECUTION,
-                TaskActionType.IMPLEMENT,
-                TaskEvent.PLAN_APPROVED,
-            ),
-        )
-        assertInstanceOf(
-            LifecycleGuardDecision.Allowed::class.java,
-            guard.evaluate(
-                TaskStage.VALIDATION,
-                TaskStage.DONE,
-                TaskActionType.FINALIZE,
-                TaskEvent.VALIDATION_PASSED,
-            ),
-        )
+        assertTrue(blocked.message.contains("validation", ignoreCase = true))
     }
 }

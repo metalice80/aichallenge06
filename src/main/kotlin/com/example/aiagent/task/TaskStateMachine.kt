@@ -4,28 +4,40 @@ import org.springframework.stereotype.Component
 
 interface TaskStateMachine {
     fun transition(currentStage: TaskStage, event: TaskEvent): TaskStage
+    fun allowedEvents(stage: TaskStage): Set<TaskEvent>
 }
 
 @Component
 class DeterministicTaskStateMachine : TaskStateMachine {
     override fun transition(currentStage: TaskStage, event: TaskEvent): TaskStage =
         TRANSITIONS[currentStage to event]
-            ?: throw InvalidTaskTransitionException(currentStage, event)
+            ?: throw InvalidTaskTransitionException(currentStage, event, allowedEvents(currentStage))
+
+    override fun allowedEvents(stage: TaskStage): Set<TaskEvent> =
+        EVENTS_BY_STAGE.getValue(stage)
 
     companion object {
-        private val TRANSITIONS = mapOf(
+        private val TRANSITIONS = linkedMapOf(
             (TaskStage.PLANNING to TaskEvent.PLAN_APPROVED) to TaskStage.EXECUTION,
             (TaskStage.EXECUTION to TaskEvent.EXECUTION_COMPLETED) to TaskStage.VALIDATION,
             (TaskStage.VALIDATION to TaskEvent.VALIDATION_PASSED) to TaskStage.DONE,
             (TaskStage.VALIDATION to TaskEvent.VALIDATION_FAILED) to TaskStage.EXECUTION,
         )
+        private val EVENTS_BY_STAGE = TaskStage.entries.associateWith { stage ->
+            TRANSITIONS.keys
+                .asSequence()
+                .filter { (currentStage, _) -> currentStage == stage }
+                .map { (_, event) -> event }
+                .toCollection(linkedSetOf())
+        }
     }
 }
 
 class InvalidTaskTransitionException(
     val currentStage: TaskStage,
     val event: TaskEvent,
-) : IllegalArgumentException("Task event $event is not valid in stage $currentStage")
+    val allowedEvents: Set<TaskEvent>,
+) : IllegalArgumentException("Event $event is not allowed in stage $currentStage.")
 
 open class InvalidTaskStateException(
     message: String,

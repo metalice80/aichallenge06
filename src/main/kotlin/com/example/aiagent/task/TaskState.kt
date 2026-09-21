@@ -115,7 +115,13 @@ data class TaskProgressProposal(
     val currentStep: String? = null,
     val expectedActionType: ExpectedActionType? = null,
     val expectedActionDescription: String? = null,
-    val proposedEvent: TaskEvent? = null,
+    val suggestedEvent: TaskEvent? = null,
     val requestedAction: TaskActionType? = null,
     val reason: String? = null,
+)
+
+data class TaskProgressUpdate(
+    val currentStep: String? = null,
+    val expectedActionType: ExpectedActionType? = null,
+    val expectedActionDescription: String? = null,
 )

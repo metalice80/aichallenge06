@@ -41,7 +41,7 @@ Browser ─► ChatController/TaskLifecycleController/UserProfileController/Task
 - `EffectiveContextBuilder` — единственный pipeline основного LLM context. Он объединяет system prompt, immutable snapshot enabled Task Invariants, Long-Term, explicit User Profile, Working, Task State, effective Short-Term и current message.
 - Task Invariants образуют hard boundary. Обычный приоритет `current USER > Task State/Working > User Profile > Long-Term > application defaults` действует только внутри допустимого пространства.
 - Input Guard выполняется до `TaskProgressAnalyzer`, Memory Extractor, main LLM и любых изменений Conversation/FSM. Output Guard проверяет candidate до показа, допускает максимум один corrective retry и повторно проверяет исправленный ответ.
-- `MemoryExtractor`, Facts Extractor, Rolling Summary и `TaskProgressAnalyzer` используют собственные prompts и не получают User Profile. Перед основным LLM request analyzer возвращает proposal; persistent FSM может изменить только `TaskStateService`.
+- `MemoryExtractor`, Facts Extractor, Rolling Summary и `TaskProgressAnalyzer` используют собственные prompts и не получают User Profile. Analyzer может обновить только progress внутри текущего stage и вернуть необязательную `suggestedEvent`; suggestion никогда не применяется к FSM. Stage меняется только через явный lifecycle event в `TaskStateService`.
 - `SqliteConversationRepository` атомарно сохраняет завершённые пары `USER + ASSISTANT`. Usage записывается с purpose `MAIN_REQUEST`, `TASK_PROGRESS_ANALYZER`, `INVARIANT_INPUT_GUARD`, `INVARIANT_OUTPUT_GUARD` или `INVARIANT_CORRECTIVE_RETRY`; Conversation totals учитывают только main requests.
 - Guard/provider/parser/diagnostic failure при active invariants обрабатывается fail-closed: main LLM и mutable pipeline не запускаются для входного запроса, а нарушающий output не сохраняется и не показывается.
 
@@ -186,7 +186,9 @@ UI содержит selector, создание и редактирование P
 
 Любая другая пара stage/event, повторный event, event во время pause или stale `expectedVersion` возвращают typed `409 Conflict` и не изменяют Task, memory или history. `PAUSE` и `RESUME` не являются stages: они меняют только `paused`; pause для `DONE` запрещён. `DONE` всегда синхронизирован с `TaskStatus.COMPLETED` и `ExpectedActionType.NONE`.
 
-UI показывает stage, current step, expected action, pause и version, progress indicator, stage-specific event controls, Pause/Resume и persistent State History. В `PLANNING` доступно подтверждение плана, в `EXECUTION` — завершение реализации, в `VALIDATION` — успешный/неуспешный результат проверки; для `DONE` state controls скрыты. Task State добавляется отдельным system block в каждый основной LLM request вне Sliding Window, поэтому короткое сообщение `Продолжай.` сохраняет смысл после reset, pause/restart или выпадения исходного обсуждения из Short-Term.
+UI показывает stage, current step, expected action, pause и version, progress indicator, event controls из backend `allowedEvents`, Pause/Resume и persistent State History. UI не выводит разрешения из локального stage: после любого state response он полностью заменяет controls backend-набором. Task State добавляется отдельным system block в каждый основной LLM request вне Sliding Window, поэтому короткое сообщение `Продолжай.` сохраняет смысл после reset, pause/restart или выпадения исходного обсуждения из Short-Term.
+
+`PLANNING`, `PLAN` и `PLAN_APPROVED` не взаимозаменяемы. `PLANNING` — stage, `PLAN` — разрешённое действие подготовки или изменения плана, а `PLAN_APPROVED` — отдельное явное событие UI/API. Запрос `PLAN` и текстовое сообщение об утверждении плана не меняют stage. После успешного ответа с планом Task ожидает `USER_CONFIRMATION`; только `POST /events` с `PLAN_APPROVED` применяет `PLANNING → EXECUTION`.
 
 Progress analyzer включён по умолчанию и настраивается независимо от основной chat model:
 
@@ -199,7 +201,7 @@ task:
       model: gpt-4o-mini
 ```
 
-Для каждого сообщения активной незавершённой и неприостановленной Task analyzer получает текущий Task State и новое user message **до** основного LLM request. Analyzer возвращает только event/progress/action proposal. `TaskLifecycleGuard` проверяет, допустимо ли запрошенное действие на текущем или предложенном этапе; blocked запрос не запускает main LLM и не меняет Conversation, Working Memory или state. Разрешённый event валидируется тем же `TaskStateMachine`, который обслуживает ручной `POST /events`, а `TaskStateService` атомарно сохраняет state и history с optimistic version check. Analyzer не использует User Profile и не пишет в SQLite напрямую; его failure обрабатывается fail-closed вне SQL transaction.
+Для каждого сообщения активной незавершённой и неприостановленной Task analyzer получает текущий Task State и новое user message **до** основного LLM request. Analyzer возвращает progress/action и необязательную `suggestedEvent`. `TaskLifecycleGuard` проверяет действие только относительно сохранённого текущего stage; blocked запрос не запускает main LLM и не меняет Conversation, Working Memory или state. `suggestedEvent` служит диагностической классификацией и никогда не передаётся в `TaskStateService.applyEvent`. Переход выполняется только явным event endpoint/UI action, валидируется канонической таблицей `TaskStateMachine` и атомарно сохраняет state/history с optimistic version check. Analyzer не использует User Profile и не пишет в SQLite напрямую; его failure обрабатывается fail-closed вне SQL transaction.
 
 ### Memory Layers и Tasks
 
@@ -336,7 +338,7 @@ POST /api/chat/memory/working/clear
 POST /api/chat/memory/long-term/clear
 ```
 
-`events` принимает только `event` и optional `expectedVersion`; stage-specific UI controls отправляют именно события (`PLAN_APPROVED`, `EXECUTION_COMPLETED`, `VALIDATION_PASSED`, `VALIDATION_FAILED`), а не целевой stage. Pause/Resume принимают optional `expectedVersion`. Ответ каждого mutation endpoint содержит фактически сохранённый backend state; UI не вычисляет следующий stage локально. `GET /memory` возвращает три слоя, Last Memory Update и sanitized Effective Context с отдельным Task State block. Working clear действует только на выбранную Task; Long-Term clear глобален.
+`events` принимает только `event` и optional `expectedVersion`; stage-specific UI controls отправляют именно события (`PLAN_APPROVED`, `EXECUTION_COMPLETED`, `VALIDATION_PASSED`, `VALIDATION_FAILED`), а не целевой stage. `GET /state`, lifecycle mutation endpoints и task list возвращают `allowedEvents`; при pause набор пуст, а typed invalid-transition `409` содержит текущий backend-набор. Pause/Resume принимают optional `expectedVersion`. UI использует `allowedEvents` как единственный источник доступности controls и не вычисляет переходы из stage локально. `GET /memory` возвращает три слоя, Last Memory Update и sanitized Effective Context с отдельным Task State block. Working clear действует только на выбранную Task; Long-Term clear глобален.
 
 ### Task Invariants
 
@@ -435,7 +437,8 @@ API возвращает JSON вида:
 
 ```bash
 ./gradlew test
+./gradlew frontendTest
 ./gradlew build
 ```
 
-Unit tests проверяют providers/plugins, Context Strategies, invariant validation/strict structured parser/fail-closed guards, pre-main ordering, corrective retry, Profile validation, FSM transition table, Pause/Resume, Effective Context и semantic priority. SQLite/Spring integration tests проверяют invariant schema/unique index/concurrency/CRUD/restart/REST/usage purposes, exact Inspector snapshot, общий `TaskStateMachine`, Task/Profile switch, state isolation/history/atomicity, Working/Long-Term и independent reset. `BookingServiceInvariantAcceptanceTest` выполняет allowed, educational, пять blocked, management, correction, repeated violation, analyzer failure и lifecycle scenarios только через deterministic fake LLM.
+Unit tests проверяют providers/plugins, Context Strategies, invariant validation/strict structured parser/fail-closed guards, pre-main ordering, corrective retry, Profile validation, точную FSM transition table, полный action matrix guard, analyzer suggestion isolation, Pause/Resume, Effective Context и semantic priority. SQLite/Spring integration tests проверяют invariant schema/unique index/concurrency/CRUD/restart/REST/usage purposes, `allowedEvents`, exact Inspector snapshot, Task/Profile switch, state isolation/history/atomicity, Working/Long-Term и independent reset. Dependency-free Node tests проверяют, что frontend controls выводятся только из backend `allowedEvents`, независимо от локального `stage`. `BookingServiceLifecycleAcceptanceTest` проходит lifecycle от планирования до `DONE` только через явные events и подтверждает, что текстовое одобрение плана не меняет stage.

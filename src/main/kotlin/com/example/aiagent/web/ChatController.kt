@@ -3,6 +3,7 @@ package com.example.aiagent.web
 import com.example.aiagent.agent.Agent
 import com.example.aiagent.agent.AgentRequest
 import com.example.aiagent.agent.Role
+import com.example.aiagent.task.TaskStateService
 import com.example.aiagent.context.strategy.ContextStrategyType
 import com.example.aiagent.web.dto.ChatHistoryResponse
 import com.example.aiagent.web.dto.ChatRequest
@@ -28,6 +29,7 @@ import org.springframework.web.bind.annotation.RestController
 @RequestMapping("/api/chat")
 class ChatController(
     private val agent: Agent,
+    private val taskStateService: TaskStateService,
 ) {
     @GetMapping("/history")
     fun history(): List<ChatHistoryResponse> =
@@ -47,7 +49,9 @@ class ChatController(
         agent.contextStrategies().map(ContextStrategyOptionResponse::from)
 
     @GetMapping("/tasks")
-    fun tasks(): List<TaskResponse> = agent.tasks().map(TaskResponse::from)
+    fun tasks(): List<TaskResponse> = agent.tasks().map { task ->
+        TaskResponse.from(task, taskStateService.allowedEvents(task))
+    }
 
     @PostMapping("/tasks")
     fun createTask(@Valid @RequestBody request: CreateTaskRequest): ChatStateResponse =

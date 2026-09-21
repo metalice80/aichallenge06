@@ -20,6 +20,7 @@ import com.example.aiagent.task.TaskEvent
 import com.example.aiagent.task.TaskStage
 import com.example.aiagent.task.TaskStateHistoryEntry
 import com.example.aiagent.task.TaskStateHistoryEvent
+import com.example.aiagent.task.TaskStateService
 import com.example.aiagent.task.TaskStatus
 import com.example.aiagent.web.dto.ChatRequest
 import com.example.aiagent.web.dto.ConversationTokenUsageResponse
@@ -38,7 +39,8 @@ import java.time.Instant
 
 class ChatControllerTest {
     private val agent = mockk<Agent>()
-    private val controller = ChatController(agent)
+    private val taskStateService = mockk<TaskStateService>(relaxed = true)
+    private val controller = ChatController(agent, taskStateService)
 
     @Test
     fun `chat delegates to agent and maps response`() {
@@ -170,10 +172,11 @@ class ChatControllerTest {
         val task = AgentTask(4, "Booking", TaskStatus.ACTIVE, createdAt, null, selected = true)
         val state = AgentState(emptyList(), ConversationTokenUsage.ZERO)
         every { agent.tasks() } returns listOf(task)
+        every { taskStateService.allowedEvents(task) } returns setOf(TaskEvent.PLAN_APPROVED)
         every { agent.createTask("Booking") } returns state
         every { agent.activateTask(4) } returns state
 
-        assertEquals("Booking", controller.tasks().single().name)
+        assertEquals(setOf(TaskEvent.PLAN_APPROVED), controller.tasks().single().allowedEvents)
         assertEquals(0, controller.createTask(CreateTaskRequest("Booking")).messages.size)
         assertEquals(0, controller.activateTask(4).messages.size)
     }

@@ -1,5 +1,6 @@
 package com.example.aiagent.web
 
+import com.example.aiagent.task.AgentTask
 import com.example.aiagent.task.TaskEventSource
 import com.example.aiagent.task.TaskStateService
 import com.example.aiagent.web.dto.TaskEventRequest
@@ -21,13 +22,13 @@ class TaskLifecycleController(
 ) {
     @GetMapping("/{taskId}/state")
     fun state(@PathVariable taskId: Long): TaskStateResponse =
-        TaskStateResponse.from(taskStateService.state(taskId))
+        response(taskStateService.state(taskId))
 
     @PostMapping("/{taskId}/events")
     fun applyEvent(
         @PathVariable taskId: Long,
         @Valid @RequestBody request: TaskEventRequest,
-    ): TaskStateResponse = TaskStateResponse.from(
+    ): TaskStateResponse = response(
         taskStateService.applyEvent(
             taskId = taskId,
             event = request.event,
@@ -40,7 +41,7 @@ class TaskLifecycleController(
     fun pause(
         @PathVariable taskId: Long,
         @RequestBody(required = false) request: TaskVersionRequest?,
-    ): TaskStateResponse = TaskStateResponse.from(
+    ): TaskStateResponse = response(
         taskStateService.pause(
             taskId = taskId,
             source = TaskEventSource.REST_API,
@@ -52,7 +53,7 @@ class TaskLifecycleController(
     fun resume(
         @PathVariable taskId: Long,
         @RequestBody(required = false) request: TaskVersionRequest?,
-    ): TaskStateResponse = TaskStateResponse.from(
+    ): TaskStateResponse = response(
         taskStateService.resume(
             taskId = taskId,
             source = TaskEventSource.REST_API,
@@ -63,4 +64,7 @@ class TaskLifecycleController(
     @GetMapping("/{taskId}/state-history")
     fun stateHistory(@PathVariable taskId: Long): List<TaskStateHistoryResponse> =
         taskStateService.history(taskId).map(TaskStateHistoryResponse::from)
+
+    private fun response(task: AgentTask): TaskStateResponse =
+        TaskStateResponse.from(task, taskStateService.allowedEvents(task))
 }

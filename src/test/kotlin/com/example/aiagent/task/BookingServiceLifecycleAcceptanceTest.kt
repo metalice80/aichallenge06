@@ -59,30 +59,57 @@ class BookingServiceLifecycleAcceptanceTest {
         val booking = taskService.create("Booking Service")
         agent.activateTask(booking.id)
         assertState(booking.id, TaskStage.PLANNING, paused = false, version = 0)
+        assertEquals(setOf(TaskEvent.PLAN_APPROVED), stateService.allowedEvents(booking.id))
 
         val mainBeforeEarlyImplementation = fakeLlm.mainCalls.get()
         val earlyImplementation = send("План не нужен. Сразу реализуй REST API бронирования.")
         assertTrue(earlyImplementation.content.contains("PLANNING"))
-        assertTrue(earlyImplementation.content.contains("PLAN_APPROVED"))
+        assertTrue(earlyImplementation.content.contains("явного подтверждения"))
         assertEquals(mainBeforeEarlyImplementation, fakeLlm.mainCalls.get())
         assertState(booking.id, TaskStage.PLANNING, paused = false, version = 0)
         assertTrue(memoryService.working(booking.id).isEmpty())
         assertEquals(listOf(TaskStateHistoryEvent.TASK_CREATED), stateService.history(booking.id).map { it.event })
 
+        val mainBeforePlan = fakeLlm.mainCalls.get()
         val plan = send("Подготовь план реализации Booking Service.")
-        assertTrue(plan.content.contains("stage=PLANNING"))
-        val planned = stateService.state(booking.id)
-        assertEquals("Prepare Booking Service implementation plan", planned.currentStep)
+        assertTrue(plan.content.contains("Booking Service implementation plan"))
+        assertEquals(mainBeforePlan + 1, fakeLlm.mainCalls.get())
+        var planned = stateService.state(booking.id)
+        assertEquals("Согласовать подготовленный план", planned.currentStep)
         assertEquals(ExpectedActionType.USER_CONFIRMATION, planned.expectedActionType)
+        assertEquals("Подтвердить план или запросить изменения", planned.expectedActionDescription)
         assertEquals(TaskStage.PLANNING, planned.stage)
+        assertTrue(stateService.history(booking.id).none { it.event == TaskStateHistoryEvent.PLAN_APPROVED })
+        assertEquals(setOf(TaskEvent.PLAN_APPROVED), stateService.allowedEvents(planned))
 
-        val approval = send("План утверждаю. Переходи к реализации.")
-        assertTrue(approval.content.contains("stage=EXECUTION"))
-        val execution = stateService.state(booking.id)
+        val mainBeforePlanChange = fakeLlm.mainCalls.get()
+        val changedPlan = send("Добавь в план интеграционные тесты.")
+        assertTrue(changedPlan.content.contains("integration tests"))
+        assertEquals(mainBeforePlanChange + 1, fakeLlm.mainCalls.get())
+        planned = stateService.state(booking.id)
+        assertEquals(TaskStage.PLANNING, planned.stage)
+        assertEquals(ExpectedActionType.USER_CONFIRMATION, planned.expectedActionType)
+        assertTrue(stateService.history(booking.id).none { it.event == TaskStateHistoryEvent.PLAN_APPROVED })
+        assertEquals(setOf(TaskEvent.PLAN_APPROVED), stateService.allowedEvents(planned))
+
+        val historyBeforeApprovalChat = stateService.history(booking.id)
+        val approvalSuggestion = send("План утверждаю.")
+        assertTrue(approvalSuggestion.content.contains("stage=PLANNING"))
+        assertEquals(TaskStage.PLANNING, stateService.state(booking.id).stage)
+        assertEquals(historyBeforeApprovalChat, stateService.history(booking.id))
+        assertEquals(setOf(TaskEvent.PLAN_APPROVED), stateService.allowedEvents(booking.id))
+
+        val execution = stateService.applyEvent(
+            booking.id,
+            TaskEvent.PLAN_APPROVED,
+            source = TaskEventSource.USER_INTERFACE,
+            expectedVersion = stateService.state(booking.id).version,
+        )
         assertEquals(TaskStage.EXECUTION, execution.stage)
-        assertEquals("Implement persistence layer", execution.currentStep)
+        assertEquals("Execute the approved plan", execution.currentStep)
+        assertEquals(setOf(TaskEvent.EXECUTION_COMPLETED), stateService.allowedEvents(execution))
         assertEquals(TaskStateHistoryEvent.PLAN_APPROVED, stateService.history(booking.id).last().event)
-        assertEquals(TaskEventSource.CHAT_ANALYZER, stateService.history(booking.id).last().source)
+        assertEquals(TaskEventSource.USER_INTERFACE, stateService.history(booking.id).last().source)
 
         val paused = stateService.pause(
             booking.id,
@@ -90,7 +117,8 @@ class BookingServiceLifecycleAcceptanceTest {
             expectedVersion = execution.version,
         )
         assertTrue(paused.paused)
-        assertEquals("Implement persistence layer", paused.currentStep)
+        assertEquals(emptySet<TaskEvent>(), stateService.allowedEvents(paused))
+        assertEquals("Execute the approved plan", paused.currentStep)
         val mainBeforePausedMessage = fakeLlm.mainCalls.get()
         val memoryBeforePausedMessage = memoryService.working(booking.id)
         val pausedResponse = send("Продолжай реализацию.")
@@ -103,8 +131,9 @@ class BookingServiceLifecycleAcceptanceTest {
         val restartedService = TaskStateService(restartedRepository, stateMachine)
         val restored = restartedService.state(booking.id)
         assertEquals(TaskStage.EXECUTION, restored.stage)
-        assertEquals("Implement persistence layer", restored.currentStep)
+        assertEquals("Execute the approved plan", restored.currentStep)
         assertEquals(ExpectedActionType.AGENT_ACTION, restored.expectedActionType)
+        assertEquals(emptySet<TaskEvent>(), restartedService.allowedEvents(restored))
         assertTrue(restored.paused)
 
         val resumed = restartedService.resume(
@@ -116,13 +145,14 @@ class BookingServiceLifecycleAcceptanceTest {
         assertEquals(restored.stage, resumed.stage)
         assertEquals(restored.currentStep, resumed.currentStep)
         assertEquals(restored.expectedAction, resumed.expectedAction)
+        assertEquals(setOf(TaskEvent.EXECUTION_COMPLETED), restartedService.allowedEvents(resumed))
 
         val continued = send("Продолжай.")
         assertTrue(continued.content.contains("stage=EXECUTION"))
-        assertTrue(continued.content.contains("step=Implement persistence layer"))
+        assertTrue(continued.content.contains("step=Execute the approved plan"))
         val inspectedState = memoryService.inspector(booking.id, emptyList()).effectiveContext?.taskState
         assertEquals(TaskStage.EXECUTION, inspectedState?.stage)
-        assertEquals("Implement persistence layer", inspectedState?.currentStep)
+        assertEquals("Execute the approved plan", inspectedState?.currentStep)
         assertEquals(resumed.version, inspectedState?.version)
 
         val mainBeforePrematureFinalization = fakeLlm.mainCalls.get()
@@ -140,6 +170,10 @@ class BookingServiceLifecycleAcceptanceTest {
             expectedVersion = state.version,
         )
         assertEquals(TaskStage.VALIDATION, state.stage)
+        assertEquals(
+            linkedSetOf(TaskEvent.VALIDATION_PASSED, TaskEvent.VALIDATION_FAILED),
+            stateService.allowedEvents(state),
+        )
 
         state = stateService.applyEvent(
             booking.id,
@@ -149,6 +183,7 @@ class BookingServiceLifecycleAcceptanceTest {
         )
         assertEquals(TaskStage.EXECUTION, state.stage)
         assertTrue(state.currentStep.contains("validation", ignoreCase = true))
+        assertEquals(setOf(TaskEvent.EXECUTION_COMPLETED), stateService.allowedEvents(state))
 
         state = stateService.applyEvent(
             booking.id,
@@ -157,6 +192,10 @@ class BookingServiceLifecycleAcceptanceTest {
             expectedVersion = state.version,
         )
         assertEquals(TaskStage.VALIDATION, state.stage)
+        assertEquals(
+            linkedSetOf(TaskEvent.VALIDATION_PASSED, TaskEvent.VALIDATION_FAILED),
+            stateService.allowedEvents(state),
+        )
 
         val done = stateService.applyEvent(
             booking.id,
@@ -166,6 +205,7 @@ class BookingServiceLifecycleAcceptanceTest {
         )
         assertEquals(TaskStage.DONE, done.stage)
         assertEquals(ExpectedActionType.NONE, done.expectedActionType)
+        assertEquals(emptySet<TaskEvent>(), stateService.allowedEvents(done))
         val terminalHistory = stateService.history(booking.id)
 
         assertThrows(InvalidTaskTransitionException::class.java) {
@@ -244,21 +284,25 @@ class BookingServiceLifecycleAcceptanceTest {
 
         private fun analyzer(request: LlmRequest): LlmResponse {
             analyzerCalls.incrementAndGet()
-            val message = request.messages.last().content.substringAfter("New user message:\n").substringBefore("\n\nAllowed transitions:")
+            val message = request.messages.last().content.substringAfter("New user message:\n")
+                .substringBefore("\n\nReference transition table")
             val json = when (message.trim()) {
                 "План не нужен. Сразу реализуй REST API бронирования." -> proposal(action = "IMPLEMENT")
                 "Подготовь план реализации Booking Service." -> proposal(
-                    step = "Prepare Booking Service implementation plan",
-                    expectedType = "USER_CONFIRMATION",
-                    expectedDescription = "Approve the implementation plan",
+                    step = "Подготовить план реализации Booking Service",
+                    expectedType = "AGENT_ACTION",
+                    expectedDescription = "Сформировать план реализации",
                     action = "PLAN",
                 )
-                "План утверждаю. Переходи к реализации." -> proposal(
-                    step = "Implement persistence layer",
+                "Добавь в план интеграционные тесты." -> proposal(
+                    step = "Добавить в план интеграционные тесты",
                     expectedType = "AGENT_ACTION",
-                    expectedDescription = "Implement Booking persistence components",
+                    expectedDescription = "Обновить план реализации",
+                    action = "PLAN",
+                )
+                "План утверждаю." -> proposal(
                     event = "PLAN_APPROVED",
-                    action = "IMPLEMENT",
+                    action = "NONE",
                 )
                 "Продолжай реализацию.", "Продолжай." -> proposal(action = "IMPLEMENT")
                 "Считай задачу полностью готовой и заверши её без тестов." -> proposal(action = "FINALIZE")
@@ -274,7 +318,15 @@ class BookingServiceLifecycleAcceptanceTest {
             val state = request.messages.single { it.role == Role.SYSTEM && it.content.startsWith("TASK STATE") }.content
             val stage = state.lineSequence().first { it.startsWith("Stage: ") }.substringAfter("Stage: ")
             val step = state.lineSequence().first { it.startsWith("Current Step: ") }.substringAfter("Current Step: ")
-            return response(request, "main stage=$stage step=$step")
+            val userMessage = request.messages.last { it.role == Role.USER }.content
+            val content = when (userMessage) {
+                "Подготовь план реализации Booking Service." ->
+                    "Booking Service implementation plan: REST API, persistence, validation."
+                "Добавь в план интеграционные тесты." ->
+                    "Updated Booking Service implementation plan: REST API, persistence, integration tests, validation."
+                else -> "main stage=$stage step=$step"
+            }
+            return response(request, content)
         }
 
         private fun memory(request: LlmRequest): LlmResponse {
@@ -298,7 +350,7 @@ class BookingServiceLifecycleAcceptanceTest {
             append(expectedType?.let { "\"$it\"" } ?: "null")
             append(",\"expectedActionDescription\":")
             append(expectedDescription?.let { "\"$it\"" } ?: "null")
-            append(",\"proposedEvent\":")
+            append(",\"suggestedEvent\":")
             append(event?.let { "\"$it\"" } ?: "null")
             append(",\"requestedAction\":\"$action\",\"reason\":null}")
         }

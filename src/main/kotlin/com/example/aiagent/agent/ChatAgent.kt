@@ -143,7 +143,8 @@ class ChatAgent(
         if (coordination is TaskCoordinationResult.Blocked) {
             return guardRefusalResponse(request, coordination.message)
         }
-        val task = (coordination as TaskCoordinationResult.Ready).task
+        val readyCoordination = coordination as TaskCoordinationResult.Ready
+        val task = readyCoordination.task
         val contextStrategy = contextStrategyResolver.resolve(request.contextStrategy)
         val contextPlan = contextStrategy.buildContext(conversation)
         val memoryContext = memoryService.context(task)
@@ -194,6 +195,7 @@ class ChatAgent(
             conversation.restore(previousMessages, previousTokenUsage, previousSummary)
             throw exception
         }
+        taskStateCoordinator.afterSuccessfulMainResponse(readyCoordination)
         contextStrategy.afterSuccessfulExchange(conversation, userMessage, assistantMessage)
         if (task.stage != TaskStage.DONE) {
             memoryService.extractAfterSuccessfulExchange(task, userMessage)

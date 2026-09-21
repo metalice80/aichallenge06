@@ -12,6 +12,11 @@ class TaskStateService(
 ) {
     fun state(taskId: Long): AgentTask = requireTask(taskId)
 
+    fun allowedEvents(taskId: Long): Set<TaskEvent> = allowedEvents(requireTask(taskId))
+
+    fun allowedEvents(task: AgentTask): Set<TaskEvent> =
+        if (task.paused) emptySet() else stateMachine.allowedEvents(task.stage)
+
     fun history(taskId: Long): List<TaskStateHistoryEntry> {
         requireTask(taskId)
         return repository.stateHistory(taskId)
@@ -21,7 +26,6 @@ class TaskStateService(
     fun applyEvent(
         taskId: Long,
         event: TaskEvent,
-        proposal: TaskProgressProposal? = null,
         source: TaskEventSource = TaskEventSource.REST_API,
         expectedVersion: Long? = null,
     ): AgentTask {
@@ -43,17 +47,9 @@ class TaskStateService(
             throw exception
         }
         val defaults = defaultProgress(event)
-        val currentStep = normalizedCurrentStep(proposal?.currentStep, defaults.currentStep)
-        val expectedActionType = if (nextStage == TaskStage.DONE) {
-            ExpectedActionType.NONE
-        } else {
-            proposal?.expectedActionType ?: defaults.expectedActionType
-        }
-        val expectedActionDescription = normalizedActionDescription(
-            expectedActionType,
-            if (nextStage == TaskStage.DONE) null else proposal?.expectedActionDescription,
-            defaults.expectedActionDescription,
-        )
+        val currentStep = defaults.currentStep
+        val expectedActionType = defaults.expectedActionType
+        val expectedActionDescription = defaults.expectedActionDescription
         val now = Instant.now()
         val nextVersion = current.version + 1
         val updated = repository.updateState(
@@ -96,21 +92,18 @@ class TaskStateService(
     }
 
     @Transactional
-    fun applyProposal(
+    fun updateProgress(
         taskId: Long,
-        proposal: TaskProgressProposal,
+        update: TaskProgressUpdate,
         source: TaskEventSource = TaskEventSource.CHAT_ANALYZER,
         expectedVersion: Long? = null,
     ): AgentTask {
-        proposal.proposedEvent?.let {
-            return applyEvent(taskId, it, proposal, source, expectedVersion)
-        }
         val current = requireTask(taskId)
         verifyExpectedVersion(current, expectedVersion)
         ensureProgressMutable(current)
 
-        val currentStep = normalizedCurrentStep(proposal.currentStep, current.currentStep)
-        val expectedActionType = proposal.expectedActionType ?: current.expectedActionType
+        val currentStep = normalizedCurrentStep(update.currentStep, current.currentStep)
+        val expectedActionType = update.expectedActionType ?: current.expectedActionType
         val expectedDescriptionFallback = if (expectedActionType == current.expectedActionType) {
             current.expectedActionDescription
         } else {
@@ -118,7 +111,7 @@ class TaskStateService(
         }
         val expectedActionDescription = normalizedActionDescription(
             expectedActionType,
-            proposal.expectedActionDescription,
+            update.expectedActionDescription,
             expectedDescriptionFallback,
         )
         if (

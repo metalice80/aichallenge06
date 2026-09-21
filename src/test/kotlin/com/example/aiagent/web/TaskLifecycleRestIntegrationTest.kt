@@ -39,6 +39,7 @@ class TaskLifecycleRestIntegrationTest {
         assertEquals("PLANNING", initial["stage"])
         assertEquals(0, (initial["version"] as Number).toInt())
         assertEquals("USER_INPUT", nested(initial, "expectedAction")["type"])
+        assertEquals(listOf("PLAN_APPROVED"), initial["allowedEvents"])
 
         val targetStage = request(
             "POST",
@@ -48,12 +49,29 @@ class TaskLifecycleRestIntegrationTest {
         assertEquals(400, targetStage.statusCode())
         assertEquals("PLANNING", objectBody(request("GET", "$base/state"))["stage"])
 
+        val invalidEvent = request(
+            "POST",
+            "$base/events",
+            """{"event":"VALIDATION_PASSED","expectedVersion":0}""",
+        )
+        assertEquals(409, invalidEvent.statusCode())
+        val invalidError = objectBody(invalidEvent)
+        assertEquals("INVALID_TASK_TRANSITION", invalidError["code"])
+        assertEquals("PLANNING", invalidError["currentStage"])
+        assertEquals("VALIDATION_PASSED", invalidError["event"])
+        assertEquals(listOf("PLAN_APPROVED"), invalidError["allowedEvents"])
+        val unchanged = objectBody(request("GET", "$base/state"))
+        assertEquals("PLANNING", unchanged["stage"])
+        assertEquals(initial["currentStep"], unchanged["currentStep"])
+        assertEquals(initial["expectedAction"], unchanged["expectedAction"])
+
         val approved = objectBody(
             request("POST", "$base/events", """{"event":"PLAN_APPROVED","expectedVersion":0}"""),
         )
         assertEquals("EXECUTION", approved["stage"])
         assertEquals(1, (approved["version"] as Number).toInt())
         assertEquals("AGENT_ACTION", nested(approved, "expectedAction")["type"])
+        assertEquals(listOf("EXECUTION_COMPLETED"), approved["allowedEvents"])
 
         val duplicate = request(
             "POST",
@@ -62,6 +80,7 @@ class TaskLifecycleRestIntegrationTest {
         )
         assertEquals(409, duplicate.statusCode())
         assertEquals("INVALID_TASK_TRANSITION", objectBody(duplicate)["code"])
+        assertEquals(listOf("EXECUTION_COMPLETED"), objectBody(duplicate)["allowedEvents"])
 
         val stalePause = request("POST", "$base/pause", """{"expectedVersion":0}""")
         assertEquals(409, stalePause.statusCode())
@@ -71,6 +90,7 @@ class TaskLifecycleRestIntegrationTest {
         assertEquals(true, paused["paused"])
         assertEquals("EXECUTION", paused["stage"])
         assertEquals(2, (paused["version"] as Number).toInt())
+        assertEquals(emptyList<String>(), paused["allowedEvents"])
 
         val pausedEvent = request(
             "POST",
@@ -84,6 +104,7 @@ class TaskLifecycleRestIntegrationTest {
         assertEquals(false, resumed["paused"])
         assertEquals("EXECUTION", resumed["stage"])
         assertEquals(3, (resumed["version"] as Number).toInt())
+        assertEquals(listOf("EXECUTION_COMPLETED"), resumed["allowedEvents"])
 
         val historyResponse = request("GET", "$base/state-history")
         assertEquals(200, historyResponse.statusCode())

@@ -8,6 +8,17 @@ class TaskStateMachineTest {
     private val stateMachine = DeterministicTaskStateMachine()
 
     @Test
+    fun `allowed events are derived only from the canonical transition table`() {
+        assertEquals(setOf(TaskEvent.PLAN_APPROVED), stateMachine.allowedEvents(TaskStage.PLANNING))
+        assertEquals(setOf(TaskEvent.EXECUTION_COMPLETED), stateMachine.allowedEvents(TaskStage.EXECUTION))
+        assertEquals(
+            linkedSetOf(TaskEvent.VALIDATION_PASSED, TaskEvent.VALIDATION_FAILED),
+            stateMachine.allowedEvents(TaskStage.VALIDATION),
+        )
+        assertEquals(emptySet<TaskEvent>(), stateMachine.allowedEvents(TaskStage.DONE))
+    }
+
+    @Test
     fun `happy path reaches DONE through every required stage`() {
         val execution = stateMachine.transition(TaskStage.PLANNING, TaskEvent.PLAN_APPROVED)
         val validation = stateMachine.transition(execution, TaskEvent.EXECUTION_COMPLETED)
@@ -50,6 +61,7 @@ class TaskStateMachineTest {
                     }
                     assertEquals(stage, exception.currentStage)
                     assertEquals(event, exception.event)
+                    assertEquals(stateMachine.allowedEvents(stage), exception.allowedEvents)
                     rejectedCount += 1
                 }
             }

@@ -182,26 +182,24 @@ class ChatAgentTest {
     }
 
     @Test
-    fun `analyzer updates Task before the main request context is built`() {
-        val executionTask = activeTask.copy(
-            stage = TaskStage.EXECUTION,
-            currentStep = "Implement persistence layer",
-            expectedActionType = ExpectedActionType.AGENT_ACTION,
-            expectedActionDescription = "Implement Room and Booking repositories",
-        )
-        val userMessage = ChatMessage(Role.USER, "План подтверждаю. Начинай реализацию.")
+    fun `analyzer event suggestion does not replace persisted Task context`() {
+        val userMessage = ChatMessage(Role.USER, "План утверждаю.")
         every { taskStateCoordinator.analyzeBeforeMainRequest(activeTask, userMessage) } returns
-            TaskCoordinationResult.Ready(executionTask, TaskActionType.IMPLEMENT, com.example.aiagent.task.TaskEvent.PLAN_APPROVED)
-        every { memoryService.context(executionTask) } returns MemoryContext(emptyList(), emptyList())
+            TaskCoordinationResult.Ready(
+                activeTask,
+                TaskActionType.NONE,
+                com.example.aiagent.task.TaskEvent.PLAN_APPROVED,
+            )
         val request = slot<LlmRequest>()
-        every { openAiClient.chat(capture(request)) } returns response("Начинаю реализацию.")
+        every { openAiClient.chat(capture(request)) } returns response(
+            "Используйте явную кнопку утверждения плана.",
+        )
 
         agent.sendMessage(agentRequest(userMessage.content))
 
         val taskStateContext = request.captured.messages.single { it.content.startsWith("TASK STATE") }
-        assertTrue(taskStateContext.content.contains("Stage: EXECUTION"))
-        assertTrue(taskStateContext.content.contains("Current Step: Implement persistence layer"))
-        assertTrue(taskStateContext.content.contains("Expected Action Type: AGENT_ACTION"))
+        assertTrue(taskStateContext.content.contains("Stage: PLANNING"))
+        assertTrue(taskStateContext.content.contains("Current Step: Define goals, requirements, and execution plan"))
         verifyOrder {
             taskStateCoordinator.analyzeBeforeMainRequest(activeTask, userMessage)
             openAiClient.chat(any())

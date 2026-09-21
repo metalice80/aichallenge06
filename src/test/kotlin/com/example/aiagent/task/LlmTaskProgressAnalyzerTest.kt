@@ -17,6 +17,8 @@ import io.mockk.slot
 import io.mockk.verify
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import tools.jackson.module.kotlin.jacksonObjectMapper
 import java.time.Instant
@@ -35,7 +37,7 @@ class LlmTaskProgressAnalyzerTest {
                   "currentStep":"Implement repository adapter",
                   "expectedActionType":"AGENT_ACTION",
                   "expectedActionDescription":"Write SQLite repository code",
-                  "proposedEvent":null,
+                  "suggestedEvent":null,
                   "requestedAction":"IMPLEMENT"
                 }
             """.trimIndent(),
@@ -80,7 +82,7 @@ class LlmTaskProgressAnalyzerTest {
         )
         assertEquals(2, request.captured.messages.size)
         assertFalse(request.captured.messages.any { it.content.contains("USER PROFILE") })
-        assertEquals(true, request.captured.messages.last().content.contains("Allowed transitions:"))
+        assertEquals(true, request.captured.messages.last().content.contains("Reference transition table"))
         assertEquals(true, request.captured.messages.last().content.contains("New user message:\nContinue"))
         assertEquals("Implement repository adapter", proposal.currentStep)
         assertEquals(ExpectedActionType.AGENT_ACTION, proposal.expectedActionType)
@@ -88,5 +90,53 @@ class LlmTaskProgressAnalyzerTest {
         assertEquals(TaskActionType.IMPLEMENT, proposal.requestedAction)
         assertEquals(TokenUsage(3, 2, 5), analysis.usage)
         verify(exactly = 1) { resolver.resolve(LlmProvider.OPENROUTER) }
+    }
+
+    @Test
+    fun `planning proposal cannot turn plan preparation into plan approval`() {
+        val client = mockk<LlmClient>()
+        val resolver = mockk<LlmClientResolver> {
+            every { resolve(LlmProvider.OPENAI) } returns client
+        }
+        val request = slot<LlmRequest>()
+        every { client.chat(capture(request)) } returns LlmResponse(
+            content = """
+                {
+                  "currentStep":"Подготовить план реализации Booking Service",
+                  "expectedActionType":"USER_CONFIRMATION",
+                  "expectedActionDescription":"Утвердить план",
+                  "suggestedEvent":"PLAN_APPROVED",
+                  "requestedAction":"PLAN"
+                }
+            """.trimIndent(),
+            model = "analyzer-model",
+            usage = TokenUsage(3, 2, 5),
+        )
+        val analyzer = LlmTaskProgressAnalyzer(
+            resolver,
+            TaskStateProperties(),
+            StructuredOutputParser(jacksonObjectMapper()),
+        )
+        val planning = AgentTask(
+            id = 1,
+            name = "Booking Service",
+            status = TaskStatus.ACTIVE,
+            createdAt = Instant.parse("2026-01-01T00:00:00Z"),
+            completedAt = null,
+            selected = true,
+        )
+
+        val proposal = analyzer.analyze(
+            planning,
+            ChatMessage(Role.USER, "Подготовь план реализации Booking Service."),
+        ).proposal
+
+        assertEquals(TaskActionType.PLAN, proposal.requestedAction)
+        assertNull(proposal.suggestedEvent)
+        assertEquals(ExpectedActionType.AGENT_ACTION, proposal.expectedActionType)
+        assertEquals("Сформировать или обновить план реализации", proposal.expectedActionDescription)
+        val prompt = request.captured.messages.last().content
+        assertTrue(prompt.contains("TaskStage.PLANNING, TaskActionType.PLAN, and TaskEvent.PLAN_APPROVED"))
+        assertTrue(prompt.contains("For PLAN in PLANNING, suggestedEvent must be null"))
     }
 }
