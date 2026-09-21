@@ -6,6 +6,8 @@ import com.example.aiagent.agent.Role
 import com.example.aiagent.context.ContextStateService
 import com.example.aiagent.context.branch.ConversationBranchService
 import com.example.aiagent.context.strategy.ContextStrategyType
+import com.example.aiagent.invariant.InvariantType
+import com.example.aiagent.invariant.TaskInvariantSnapshot
 import com.example.aiagent.memory.EffectiveContext
 import com.example.aiagent.memory.MemoryChangeType
 import com.example.aiagent.memory.MemoryEntry
@@ -251,6 +253,17 @@ class SqliteMemoryLayersIntegrationTest {
                 customInstructions = "Prefer Kotlin.",
             ),
             workingMemory = listOf(MemoryEntry("database", "PostgreSQL")),
+            taskInvariants = listOf(
+                TaskInvariantSnapshot(
+                    id = 17,
+                    taskId = task.id,
+                    taskName = task.name,
+                    type = InvariantType.TECHNICAL_DECISION,
+                    key = "database",
+                    value = "PostgreSQL",
+                    description = "Primary relational database",
+                ),
+            ),
             shortTerm = listOf(ChatMessage(Role.ASSISTANT, "Previous answer")),
             currentUserMessage = ChatMessage(Role.USER, "Current question"),
             preparedAt = Instant.parse("2026-01-01T00:00:00Z"),

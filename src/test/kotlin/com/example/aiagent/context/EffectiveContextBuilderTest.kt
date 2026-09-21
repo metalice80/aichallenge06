@@ -5,6 +5,9 @@ import com.example.aiagent.agent.Role
 import com.example.aiagent.config.LlmProperties
 import com.example.aiagent.context.strategy.ContextPlan
 import com.example.aiagent.context.strategy.ContextStrategyType
+import com.example.aiagent.invariant.InvariantType
+import com.example.aiagent.invariant.TaskInvariantSet
+import com.example.aiagent.invariant.TaskInvariantSnapshot
 import com.example.aiagent.memory.MemoryContext
 import com.example.aiagent.memory.MemoryEntry
 import com.example.aiagent.memory.SecretRedactor
@@ -180,6 +183,37 @@ class EffectiveContextBuilderTest {
         assertTrue(prepared.messages[1].content.contains("Paused: true"))
         assertEquals(executionTask.stateSnapshot(), prepared.diagnostic.taskState)
         assertTrue(prepared.diagnostic.shortTerm.isEmpty())
+    }
+
+    @Test
+    fun `enabled invariant snapshot is a hard boundary in request and exact inspector metadata`() {
+        val snapshot = TaskInvariantSnapshot(
+            id = 14,
+            taskId = task.id,
+            taskName = task.name,
+            type = InvariantType.TECHNICAL_DECISION,
+            key = "database",
+            value = "PostgreSQL\nprimary",
+            description = "Do not replace with \"MongoDB\".",
+        )
+
+        val prepared = builder.build(
+            task = task,
+            profile = null,
+            strategy = ContextStrategyType.SLIDING_WINDOW,
+            memoryContext = MemoryContext(emptyList(), emptyList()),
+            contextPlan = ContextPlan(emptyList()),
+            invariantSet = TaskInvariantSet(task.id, task.name, listOf(snapshot)),
+            currentUserMessage = ChatMessage(Role.USER, "Design persistence"),
+        )
+
+        val invariantBlock = prepared.messages[1].content
+        assertTrue(invariantBlock.startsWith("TASK INVARIANTS"))
+        assertTrue(invariantBlock.contains("[TECHNICAL_DECISION] #14"))
+        assertTrue(invariantBlock.contains("Value: \"PostgreSQL\\nprimary\""))
+        assertTrue(invariantBlock.contains("Description: \"Do not replace with \\\"MongoDB\\\".\""))
+        assertEquals(listOf(snapshot), prepared.diagnostic.taskInvariants)
+        assertTrue(prepared.messages[2].content.startsWith("TASK STATE"))
     }
 
     private fun profile(

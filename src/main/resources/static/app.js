@@ -21,6 +21,20 @@ const taskExpectedAction = document.querySelector('#task-expected-action');
 const taskExpectedDescription = document.querySelector('#task-expected-description');
 const taskPausedBadge = document.querySelector('#task-paused-badge');
 const taskProgress = document.querySelector('#task-progress');
+const addInvariantButton = document.querySelector('#add-invariant-button');
+const invariantList = document.querySelector('#invariant-list');
+const lastInvariantCheck = document.querySelector('#last-invariant-check');
+const invariantDialog = document.querySelector('#invariant-dialog');
+const invariantForm = document.querySelector('#invariant-form');
+const invariantDialogTitle = document.querySelector('#invariant-dialog-title');
+const invariantTypeSelect = document.querySelector('#invariant-type-select');
+const invariantKeyInput = document.querySelector('#invariant-key-input');
+const invariantValueInput = document.querySelector('#invariant-value-input');
+const invariantDescriptionInput = document.querySelector('#invariant-description-input');
+const invariantEnabledInput = document.querySelector('#invariant-enabled-input');
+const invariantFormError = document.querySelector('#invariant-form-error');
+const cancelInvariantButton = document.querySelector('#cancel-invariant-button');
+const saveInvariantButton = document.querySelector('#save-invariant-button');
 const profileSelect = document.querySelector('#profile-select');
 const createProfileButton = document.querySelector('#create-profile-button');
 const editProfileButton = document.querySelector('#edit-profile-button');
@@ -55,6 +69,8 @@ let busy = false;
 let activeTask = null;
 let profiles = [];
 let editingProfileId = null;
+let invariants = [];
+let editingInvariantId = null;
 
 chatForm.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -108,6 +124,7 @@ chatForm.addEventListener('submit', async (event) => {
         updateStats(payload);
         await loadMemory();
         await refreshTaskState();
+        await loadLastInvariantCheck();
     } catch (error) {
         userElement.remove();
         restoreEmptyStateIfNeeded();
@@ -211,6 +228,53 @@ taskHistoryButton.addEventListener('click', async () => {
         await loadTaskStateHistory();
         taskStateHistory.hidden = false;
     }, 'Не удалось загрузить историю состояния Task.');
+});
+
+addInvariantButton.addEventListener('click', () => {
+    if (!busy && activeTask) openInvariantDialog(null);
+});
+
+cancelInvariantButton.addEventListener('click', () => invariantDialog.close());
+
+invariantForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (busy || !activeTask) return;
+    const body = {
+        type: invariantTypeSelect.value,
+        key: invariantKeyInput.value.trim(),
+        value: invariantValueInput.value.trim(),
+        description: invariantDescriptionInput.value.trim() || null,
+        enabled: invariantEnabledInput.checked,
+    };
+    invariantFormError.hidden = true;
+    setBusy(true);
+    try {
+        const invariantId = editingInvariantId;
+        const response = await fetch(
+            invariantId === null
+                ? `/api/tasks/${encodeURIComponent(activeTask.id)}/invariants`
+                : `/api/tasks/${encodeURIComponent(activeTask.id)}/invariants/${encodeURIComponent(invariantId)}`,
+            {
+                method: invariantId === null ? 'POST' : 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            },
+        );
+        const payload = await readJson(response);
+        if (!response.ok) {
+            invariantFormError.textContent = payload?.message || 'Не удалось сохранить invariant.';
+            invariantFormError.hidden = false;
+            return;
+        }
+        invariantDialog.close();
+        await loadInvariants();
+    } catch (error) {
+        invariantFormError.textContent =
+            error instanceof Error ? error.message : 'Не удалось сохранить invariant.';
+        invariantFormError.hidden = false;
+    } finally {
+        setBusy(false);
+    }
 });
 
 taskSelect.addEventListener('change', async () => {
@@ -455,6 +519,179 @@ async function loadTasks() {
     taskStateHistory.hidden = true;
     renderTaskState(activeTask);
     updateTaskControls();
+    await loadInvariants();
+    await loadLastInvariantCheck();
+}
+
+async function loadInvariants() {
+    if (!activeTask) return;
+    const response = await fetch(`/api/tasks/${encodeURIComponent(activeTask.id)}/invariants`);
+    const payload = await readJson(response);
+    if (!response.ok || !Array.isArray(payload)) {
+        throw new Error(payload?.message || 'Не удалось загрузить invariants.');
+    }
+    invariants = payload;
+    renderInvariants();
+}
+
+function renderInvariants() {
+    invariantList.replaceChildren();
+    if (!invariants.length) {
+        invariantList.append(diagnosticEmpty('Для активной Task invariants не заданы.'));
+        return;
+    }
+    invariants.forEach((invariant) => {
+        const card = document.createElement('article');
+        card.className = `invariant-card${invariant.enabled ? '' : ' disabled'}`;
+
+        const heading = document.createElement('div');
+        heading.className = 'invariant-card-heading';
+        const type = document.createElement('span');
+        type.className = 'invariant-card-type';
+        type.textContent = `${invariant.enabled ? '✓' : '○'} ${invariant.type}`;
+        const status = document.createElement('span');
+        status.textContent = invariant.enabled ? 'Enabled' : 'Disabled';
+        heading.append(type, status);
+
+        const value = document.createElement('p');
+        value.className = 'invariant-card-value';
+        value.textContent = `${invariant.key} = ${invariant.value}`;
+        card.append(heading, value);
+        if (invariant.description) {
+            const description = document.createElement('p');
+            description.className = 'invariant-card-description';
+            description.textContent = invariant.description;
+            card.append(description);
+        }
+
+        const actions = document.createElement('div');
+        actions.className = 'invariant-card-actions';
+        const edit = invariantActionButton('Edit', 'button-secondary', () => openInvariantDialog(invariant));
+        const toggle = invariantActionButton(
+            invariant.enabled ? 'Disable' : 'Enable',
+            invariant.enabled ? 'button-secondary' : 'button-primary',
+            () => setInvariantEnabled(invariant, !invariant.enabled),
+        );
+        const remove = invariantActionButton('Delete', 'button-secondary', () => deleteInvariant(invariant));
+        actions.append(edit, toggle, remove);
+        card.append(actions);
+        invariantList.append(card);
+    });
+}
+
+function invariantActionButton(label, style, handler) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `button ${style} invariant-action`;
+    button.textContent = label;
+    button.disabled = busy;
+    button.addEventListener('click', handler);
+    return button;
+}
+
+function openInvariantDialog(invariant) {
+    editingInvariantId = invariant?.id ?? null;
+    invariantDialogTitle.textContent = invariant ? 'Редактировать invariant' : 'Новый invariant';
+    invariantTypeSelect.value = invariant?.type || 'OTHER';
+    invariantKeyInput.value = invariant?.key || '';
+    invariantValueInput.value = invariant?.value || '';
+    invariantDescriptionInput.value = invariant?.description || '';
+    invariantEnabledInput.checked = invariant?.enabled ?? true;
+    invariantFormError.textContent = '';
+    invariantFormError.hidden = true;
+    invariantDialog.showModal();
+    invariantKeyInput.focus();
+}
+
+async function setInvariantEnabled(invariant, enabled) {
+    if (busy || !activeTask) return;
+    await runAction(async () => {
+        const response = await fetch(
+            `/api/tasks/${encodeURIComponent(activeTask.id)}/invariants/${encodeURIComponent(invariant.id)}/enabled`,
+            {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled }),
+            },
+        );
+        const payload = await readJson(response);
+        if (!response.ok) {
+            throw new Error(payload?.message || 'Не удалось изменить invariant.');
+        }
+        await loadInvariants();
+    }, 'Не удалось изменить invariant.');
+}
+
+async function deleteInvariant(invariant) {
+    if (busy || !activeTask) return;
+    if (!window.confirm(`Удалить invariant ${invariant.key} = ${invariant.value}?`)) return;
+    await runAction(async () => {
+        const response = await fetch(
+            `/api/tasks/${encodeURIComponent(activeTask.id)}/invariants/${encodeURIComponent(invariant.id)}`,
+            { method: 'DELETE' },
+        );
+        if (!response.ok) {
+            const payload = await readJson(response);
+            throw new Error(payload?.message || 'Не удалось удалить invariant.');
+        }
+        await loadInvariants();
+    }, 'Не удалось удалить invariant.');
+}
+
+async function loadLastInvariantCheck() {
+    if (!activeTask) return;
+    const response = await fetch(
+        `/api/tasks/${encodeURIComponent(activeTask.id)}/invariant-checks/last`,
+    );
+    if (response.status === 204) {
+        renderLastInvariantCheck(null);
+        return;
+    }
+    const payload = await readJson(response);
+    if (!response.ok) {
+        throw new Error(payload?.message || 'Не удалось загрузить Last Invariant Check.');
+    }
+    renderLastInvariantCheck(payload);
+}
+
+function renderLastInvariantCheck(check) {
+    lastInvariantCheck.replaceChildren();
+    if (!check) {
+        lastInvariantCheck.append(diagnosticEmpty('Проверок пока нет.'));
+        return;
+    }
+    lastInvariantCheck.append(diagnosticRow('Result', check.result || '—'));
+    lastInvariantCheck.append(diagnosticRow('Direction', check.direction || '—'));
+    lastInvariantCheck.append(diagnosticRow('Outcome', check.outcome || '—'));
+    lastInvariantCheck.append(diagnosticRow('Status', check.status || '—'));
+    if (check.errorCode) {
+        lastInvariantCheck.append(diagnosticRow('Error code', check.errorCode));
+    }
+    lastInvariantCheck.append(diagnosticRow('Request', check.requestExcerpt || '—'));
+    lastInvariantCheck.append(diagnosticRow('Guard', `${check.provider || '—'} · ${check.model || '—'}`));
+    lastInvariantCheck.append(
+        diagnosticRow(
+            'Internal usage',
+            `${formatTokenCount(check.usage?.inputTokens)} / ${formatTokenCount(check.usage?.outputTokens)} / ${formatTokenCount(check.usage?.totalTokens)}`,
+        ),
+    );
+    lastInvariantCheck.append(
+        diagnosticRow(
+            'Guard latency',
+            Number.isFinite(Number(check.responseTimeMs)) ? `${check.responseTimeMs} ms` : '—',
+        ),
+    );
+    lastInvariantCheck.append(diagnosticRow('Corrective retries', String(check.correctiveRetries ?? 0)));
+    const violations = Array.isArray(check.violations) ? check.violations : [];
+    violations.forEach((violation) => {
+        const invariant = violation?.invariant;
+        lastInvariantCheck.append(
+            diagnosticRow(
+                `Violated #${invariant?.id ?? '—'} ${invariant?.type || ''}`,
+                `${invariant?.key || '—'} = ${invariant?.value || '—'}\n${violation?.reason || '—'}`,
+            ),
+        );
+    });
 }
 
 async function loadProfiles() {
@@ -758,6 +995,8 @@ function renderEffectiveContext(context) {
     }
     effectiveContext.append(diagnosticSection('SYSTEM PROMPT'));
     effectiveContext.append(diagnosticText(context.systemPrompt || ''));
+    effectiveContext.append(diagnosticSection('TASK INVARIANTS'));
+    appendContextInvariants(effectiveContext, context.taskInvariants);
     effectiveContext.append(diagnosticSection('LONG-TERM MEMORY'));
     appendContextEntries(effectiveContext, context.longTermMemory);
     effectiveContext.append(diagnosticSection('USER PROFILE'));
@@ -774,6 +1013,23 @@ function renderEffectiveContext(context) {
     });
     effectiveContext.append(diagnosticSection('CURRENT USER MESSAGE'));
     effectiveContext.append(diagnosticRow('USER', context.currentUserMessage?.content || ''));
+}
+
+function appendContextInvariants(container, invariants) {
+    const values = Array.isArray(invariants) ? invariants : [];
+    if (!values.length) {
+        container.append(diagnosticEmpty('(empty)'));
+        return;
+    }
+    values.forEach((invariant) => {
+        const description = invariant.description ? `\n${invariant.description}` : '';
+        container.append(
+            diagnosticRow(
+                `[${invariant.type || 'OTHER'}] #${invariant.id ?? '—'}`,
+                `${invariant.key || '—'} = ${invariant.value || '—'}${description}`,
+            ),
+        );
+    });
 }
 
 function appendContextProfile(container, profile) {
@@ -919,6 +1175,17 @@ function setBusy(value) {
     createProfileButton.disabled = value;
     editProfileButton.disabled = value || !profileSelect.value;
     createTaskButton.disabled = value;
+    addInvariantButton.disabled = value || !activeTask;
+    invariantTypeSelect.disabled = value;
+    invariantKeyInput.disabled = value;
+    invariantValueInput.disabled = value;
+    invariantDescriptionInput.disabled = value;
+    invariantEnabledInput.disabled = value;
+    cancelInvariantButton.disabled = value;
+    saveInvariantButton.disabled = value;
+    document.querySelectorAll('.invariant-action').forEach((button) => {
+        button.disabled = value;
+    });
     branchSelect.disabled = value;
     createBranchButton.disabled = value;
     resetButton.disabled = value;

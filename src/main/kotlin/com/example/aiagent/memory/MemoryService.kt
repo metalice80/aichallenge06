@@ -1,5 +1,6 @@
 package com.example.aiagent.memory
 
+import com.example.aiagent.invariant.TaskInvariantSnapshot
 import com.example.aiagent.agent.ChatMessage
 import com.example.aiagent.config.MemoryProperties
 import com.example.aiagent.profile.UserProfileSnapshot
@@ -61,6 +62,7 @@ class MemoryService(
                 longTermMemory = context.longTermMemory.map(::redact),
                 userProfile = context.userProfile?.let(::redact),
                 workingMemory = context.workingMemory.map(::redact),
+                taskInvariants = context.taskInvariants.map(::redact),
                 shortTerm = context.shortTerm.map(::redact),
                 currentUserMessage = redact(context.currentUserMessage),
             ),
@@ -85,6 +87,13 @@ class MemoryService(
     private fun redact(profile: UserProfileSnapshot) = profile.copy(
         name = secretRedactor.redact(profile.name),
         customInstructions = secretRedactor.redact(profile.customInstructions),
+    )
+
+    private fun redact(invariant: TaskInvariantSnapshot) = invariant.copy(
+        taskName = secretRedactor.redact(invariant.taskName),
+        key = secretRedactor.redact(invariant.key),
+        value = secretRedactor.redact(invariant.value),
+        description = invariant.description?.let(secretRedactor::redact),
     )
 
     private fun redact(message: ChatMessage) = message.copy(content = secretRedactor.redact(message.content))

@@ -4,6 +4,7 @@ import com.example.aiagent.agent.ChatMessage
 import com.example.aiagent.agent.Conversation
 import com.example.aiagent.agent.ConversationSummary
 import com.example.aiagent.agent.ConversationTokenUsage
+import com.example.aiagent.agent.LlmRequestPurpose
 import com.example.aiagent.agent.LlmRequestUsage
 import com.example.aiagent.agent.Role
 import org.springframework.jdbc.core.ConnectionCallback
@@ -55,11 +56,19 @@ class SqliteConversationRepository(
         )
         addTaskIdColumnIfMissing("chat_message")
         addTaskIdColumnIfMissing("llm_request_usage")
+        addColumnIfMissing(
+            "llm_request_usage",
+            "purpose",
+            "TEXT NOT NULL DEFAULT '${LlmRequestPurpose.MAIN_REQUEST.name}'",
+        )
         jdbcTemplate.execute(
             "CREATE INDEX IF NOT EXISTS idx_chat_message_task_id ON chat_message(task_id, id)",
         )
         jdbcTemplate.execute(
             "CREATE INDEX IF NOT EXISTS idx_llm_request_usage_task_id ON llm_request_usage(task_id, id)",
+        )
+        jdbcTemplate.execute(
+            "CREATE INDEX IF NOT EXISTS idx_llm_request_usage_task_purpose ON llm_request_usage(task_id, purpose, id)",
         )
         jdbcTemplate.execute(
             """
@@ -102,7 +111,7 @@ class SqliteConversationRepository(
                 COALESCE(SUM(output_tokens), 0) AS output_tokens,
                 COALESCE(SUM(COALESCE(total_tokens, COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0))), 0) AS total_tokens
             FROM llm_request_usage
-            WHERE task_id = ?
+            WHERE task_id = ? AND purpose = '${LlmRequestPurpose.MAIN_REQUEST.name}'
             """.trimIndent(),
             { resultSet, _ ->
                 ConversationTokenUsage(
@@ -146,6 +155,10 @@ class SqliteConversationRepository(
     override fun save(conversation: Conversation, requestUsage: LlmRequestUsage) {
         replaceMessages(conversation.taskId, conversation.messages())
         insertUsage(conversation.taskId, requestUsage)
+    }
+
+    override fun recordUsage(taskId: Long, requestUsage: LlmRequestUsage) {
+        insertUsage(taskId, requestUsage)
     }
 
     @Transactional
@@ -203,19 +216,20 @@ class SqliteConversationRepository(
         jdbcTemplate.update(
             """
             INSERT INTO llm_request_usage(
-                task_id, provider, model, input_tokens, output_tokens,
+                task_id, purpose, provider, model, input_tokens, output_tokens,
                 total_tokens, response_time_ms, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """.trimIndent(),
             { statement ->
                 statement.setLong(1, taskId)
-                statement.setString(2, requestUsage.provider.name)
-                statement.setString(3, requestUsage.model)
-                statement.setNullableLong(4, requestUsage.tokenUsage.inputTokens)
-                statement.setNullableLong(5, requestUsage.tokenUsage.outputTokens)
-                statement.setNullableLong(6, requestUsage.tokenUsage.totalTokens)
-                statement.setLong(7, requestUsage.responseTimeMs)
-                statement.setString(8, Instant.now().toString())
+                statement.setString(2, requestUsage.purpose.name)
+                statement.setString(3, requestUsage.provider.name)
+                statement.setString(4, requestUsage.model)
+                statement.setNullableLong(5, requestUsage.tokenUsage.inputTokens)
+                statement.setNullableLong(6, requestUsage.tokenUsage.outputTokens)
+                statement.setNullableLong(7, requestUsage.tokenUsage.totalTokens)
+                statement.setLong(8, requestUsage.responseTimeMs)
+                statement.setString(9, Instant.now().toString())
             },
         )
     }
@@ -225,6 +239,14 @@ class SqliteConversationRepository(
             .mapNotNull { row -> row["name"]?.toString() }
         if ("task_id" !in columns) {
             jdbcTemplate.execute("ALTER TABLE $table ADD COLUMN task_id INTEGER NOT NULL DEFAULT 1")
+        }
+    }
+
+    private fun addColumnIfMissing(table: String, column: String, definition: String) {
+        val columns = jdbcTemplate.queryForList("PRAGMA table_info($table)")
+            .mapNotNull { row -> row["name"]?.toString() }
+        if (column !in columns) {
+            jdbcTemplate.execute("ALTER TABLE $table ADD COLUMN $column $definition")
         }
     }
 

@@ -74,6 +74,23 @@
             </div>
             <div id="task-state-history" class="task-state-history" hidden></div>
         </section>
+        <section class="invariants-panel" aria-labelledby="invariants-title">
+            <div class="task-state-heading">
+                <div>
+                    <p class="eyebrow">Mandatory task boundaries</p>
+                    <h2 id="invariants-title">Invariants</h2>
+                </div>
+                <button id="add-invariant-button" class="button button-primary" type="button">
+                    + Add invariant
+                </button>
+            </div>
+            <div id="invariant-list" class="invariant-list"></div>
+            <div class="stats-divider" aria-hidden="true"></div>
+            <section aria-labelledby="last-invariant-check-title">
+                <h3 id="last-invariant-check-title">Last Invariant Check</h3>
+                <div id="last-invariant-check" class="diagnostic-block">Проверок пока нет.</div>
+            </section>
+        </section>
         <div class="profile-controls" aria-label="Активный профиль">
             <label class="provider-field profile-selector" for="profile-select">
                 <span>Profile</span>
@@ -296,6 +313,45 @@
             <div class="profile-form-actions">
                 <button id="cancel-profile-button" class="button button-secondary" type="button">Отмена</button>
                 <button class="button button-primary" type="submit">Сохранить</button>
+            </div>
+        </form>
+    </dialog>
+    <dialog id="invariant-dialog" class="profile-dialog" aria-labelledby="invariant-dialog-title">
+        <form id="invariant-form" class="profile-form">
+            <div>
+                <p class="eyebrow">Explicit Task management</p>
+                <h2 id="invariant-dialog-title">Новый invariant</h2>
+            </div>
+            <label class="provider-field" for="invariant-type-select">
+                <span>Type</span>
+                <select id="invariant-type-select" name="type" required>
+                    <option value="ARCHITECTURE">Architecture</option>
+                    <option value="TECHNICAL_DECISION">Technical decision</option>
+                    <option value="STACK_CONSTRAINT">Stack constraint</option>
+                    <option value="BUSINESS_RULE">Business rule</option>
+                    <option value="OTHER">Other</option>
+                </select>
+            </label>
+            <label class="provider-field" for="invariant-key-input">
+                <span>Key</span>
+                <input id="invariant-key-input" name="key" maxlength="120" required>
+            </label>
+            <label class="provider-field" for="invariant-value-input">
+                <span>Value</span>
+                <textarea id="invariant-value-input" name="value" rows="3" maxlength="1000" required></textarea>
+            </label>
+            <label class="provider-field" for="invariant-description-input">
+                <span>Description</span>
+                <textarea id="invariant-description-input" name="description" rows="4" maxlength="2000"></textarea>
+            </label>
+            <label class="invariant-enabled-field" for="invariant-enabled-input">
+                <input id="invariant-enabled-input" name="enabled" type="checkbox" checked>
+                <span>Enabled</span>
+            </label>
+            <p id="invariant-form-error" class="error-message" role="alert" hidden></p>
+            <div class="profile-form-actions">
+                <button id="cancel-invariant-button" class="button button-secondary" type="button">Отмена</button>
+                <button id="save-invariant-button" class="button button-primary" type="submit">Сохранить</button>
             </div>
         </form>
     </dialog>

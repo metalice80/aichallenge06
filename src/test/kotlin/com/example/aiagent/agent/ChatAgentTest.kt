@@ -12,6 +12,18 @@ import com.example.aiagent.context.strategy.ContextStrategy
 import com.example.aiagent.context.strategy.ContextStrategyResolver
 import com.example.aiagent.context.strategy.ContextStrategyType
 import com.example.aiagent.context.strategy.SlidingWindowContextStrategy
+import com.example.aiagent.invariant.InvariantCheckDecision
+import com.example.aiagent.invariant.InvariantCheckDirection
+import com.example.aiagent.invariant.InvariantGuardException
+import com.example.aiagent.invariant.InvariantCheckResult
+import com.example.aiagent.invariant.InvariantCheckStatus
+import com.example.aiagent.invariant.InvariantType
+import com.example.aiagent.invariant.InvariantViolation
+import com.example.aiagent.invariant.InvariantGuardEvaluation
+import com.example.aiagent.invariant.InvariantGuardService
+import com.example.aiagent.invariant.TaskInvariantService
+import com.example.aiagent.invariant.TaskInvariantSnapshot
+import com.example.aiagent.invariant.TaskInvariantSet
 import com.example.aiagent.llm.DefaultLlmClientResolver
 import com.example.aiagent.llm.LlmClient
 import com.example.aiagent.llm.LlmNetworkException
@@ -99,6 +111,15 @@ class ChatAgentTest {
         every { activeTask() } returns activeTask
     }
     private val taskStateService = mockk<TaskStateService>(relaxed = true)
+    private val emptyInvariantSet = TaskInvariantSet.empty(activeTask.id, activeTask.name)
+    private val taskInvariantService = mockk<TaskInvariantService> {
+        every { snapshot(activeTask) } returns emptyInvariantSet
+    }
+    private val invariantGuardService = mockk<InvariantGuardService>(relaxed = true) {
+        every { evaluateInput(any(), emptyInvariantSet) } returns allowedCheck(InvariantCheckDirection.INPUT)
+        every { evaluateOutput(any(), any(), emptyInvariantSet) } returns allowedCheck(InvariantCheckDirection.OUTPUT)
+        every { maxCorrectiveRetries } returns 1
+    }
     private val taskStateCoordinator = mockk<TaskStateCoordinator>(relaxed = true) {
         every { analyzeBeforeMainRequest(activeTask, any()) } returns activeTask
     }
@@ -118,6 +139,8 @@ class ChatAgentTest {
         branchService = branchService,
         taskService = taskService,
         taskStateService = taskStateService,
+        taskInvariantService = taskInvariantService,
+        invariantGuardService = invariantGuardService,
         taskStateCoordinator = taskStateCoordinator,
         memoryService = memoryService,
         effectiveContextBuilder = effectiveContextBuilder,
@@ -341,6 +364,8 @@ class ChatAgentTest {
             branchService = branchService,
             taskService = taskService,
             taskStateService = taskStateService,
+            taskInvariantService = taskInvariantService,
+            invariantGuardService = invariantGuardService,
             taskStateCoordinator = taskStateCoordinator,
             memoryService = memoryService,
             effectiveContextBuilder = effectiveContextBuilder,
@@ -414,6 +439,8 @@ class ChatAgentTest {
             branchService = branchService,
             taskService = taskService,
             taskStateService = taskStateService,
+            taskInvariantService = taskInvariantService,
+            invariantGuardService = invariantGuardService,
             taskStateCoordinator = taskStateCoordinator,
             memoryService = memoryService,
             effectiveContextBuilder = effectiveContextBuilder,
@@ -476,6 +503,8 @@ class ChatAgentTest {
             branchService = branchService,
             taskService = taskService,
             taskStateService = taskStateService,
+            taskInvariantService = taskInvariantService,
+            invariantGuardService = invariantGuardService,
             taskStateCoordinator = taskStateCoordinator,
             memoryService = memoryService,
             effectiveContextBuilder = effectiveContextBuilder,
@@ -566,6 +595,8 @@ class ChatAgentTest {
             branchService = branchService,
             taskService = taskService,
             taskStateService = taskStateService,
+            taskInvariantService = taskInvariantService,
+            invariantGuardService = invariantGuardService,
             taskStateCoordinator = taskStateCoordinator,
             memoryService = memoryService,
             effectiveContextBuilder = effectiveContextBuilder,
@@ -628,6 +659,166 @@ class ChatAgentTest {
 
 
     @Test
+    fun `blocked input stops before Task analyzer memory and main LLM`() {
+        val protectedSet = protectedInvariantSet()
+        val blocked = guardCheck(
+            protectedSet,
+            InvariantCheckDirection.INPUT,
+            InvariantCheckDecision.BLOCKED,
+        )
+        every { taskInvariantService.snapshot(activeTask) } returns protectedSet
+        every { invariantGuardService.evaluateInput(any(), protectedSet) } returns blocked
+        every { invariantGuardService.semanticRefusal(blocked) } returns
+            "Blocked by backend_language = Kotlin"
+
+        val response = agent.sendMessage(agentRequest("Перепиши backend на Java"))
+
+        assertEquals("Blocked by backend_language = Kotlin", response.content)
+        assertEquals(TokenUsage(0, 0, 0), response.currentUsage)
+        assertTrue(conversation.messages().isEmpty())
+        verify(exactly = 0) { taskStateCoordinator.analyzeBeforeMainRequest(any(), any()) }
+        verify(exactly = 0) { memoryService.context(any()) }
+        verify(exactly = 0) { openAiClient.chat(any()) }
+        verify(exactly = 0) { memoryService.extractAfterSuccessfulExchange(any(), any()) }
+    }
+
+    @Test
+    fun `input analyzer failure is fail closed before every mutable pipeline component`() {
+        val protectedSet = protectedInvariantSet()
+        every { taskInvariantService.snapshot(activeTask) } returns protectedSet
+        every { invariantGuardService.evaluateInput(any(), protectedSet) } throws
+            InvariantGuardException("TIMEOUT")
+        every { invariantGuardService.technicalRefusal() } returns "Technical guard refusal"
+
+        val response = agent.sendMessage(agentRequest("Continue"))
+
+        assertEquals("Technical guard refusal", response.content)
+        assertTrue(conversation.messages().isEmpty())
+        verify(exactly = 0) { taskStateCoordinator.analyzeBeforeMainRequest(any(), any()) }
+        verify(exactly = 0) { openAiClient.chat(any()) }
+        verify(exactly = 1) {
+            invariantGuardService.recordFailure(
+                protectedSet,
+                InvariantCheckDirection.INPUT,
+                "Continue",
+                0,
+                any(),
+                "CHECK_FAILED",
+                match { it.code == "TIMEOUT" },
+            )
+        }
+    }
+
+    @Test
+    fun `output violation performs one correction and delivers only rechecked response`() {
+        val protectedSet = protectedInvariantSet()
+        val inputAllowed = guardCheck(protectedSet, InvariantCheckDirection.INPUT)
+        val outputBlocked = guardCheck(
+            protectedSet,
+            InvariantCheckDirection.OUTPUT,
+            InvariantCheckDecision.BLOCKED,
+        )
+        val correctedAllowed = guardCheck(protectedSet, InvariantCheckDirection.OUTPUT)
+        every { taskInvariantService.snapshot(activeTask) } returns protectedSet
+        every { invariantGuardService.evaluateInput(any(), protectedSet) } returns inputAllowed
+        every { invariantGuardService.evaluateOutput(any(), any(), protectedSet) } returnsMany
+            listOf(outputBlocked, correctedAllowed)
+        every { invariantGuardService.correctiveInstruction(outputBlocked) } returns "Correct the database"
+        every { invariantGuardService.maxCorrectiveRetries } returns 1
+        every { openAiClient.chat(any()) } returnsMany listOf(
+            response("Use MongoDB as primary storage"),
+            response("Use PostgreSQL as required"),
+        )
+
+        val result = agent.sendMessage(agentRequest("Design persistence"))
+
+        assertEquals("Use PostgreSQL as required", result.content)
+        assertEquals(
+            listOf("Design persistence", "Use PostgreSQL as required"),
+            conversation.messages().map { it.content },
+        )
+        verify(exactly = 2) { openAiClient.chat(any()) }
+        verify(exactly = 1) {
+            conversationRepository.recordUsage(
+                activeTask.id,
+                match { it.purpose == LlmRequestPurpose.INVARIANT_CORRECTIVE_RETRY },
+            )
+        }
+        verify(exactly = 1) {
+            invariantGuardService.evaluateInput("Design persistence", protectedSet)
+        }
+        verify(exactly = 2) {
+            invariantGuardService.evaluateOutput("Design persistence", any(), protectedSet)
+        }
+    }
+
+    @Test
+    fun `second output violation returns refusal and never exposes either candidate`() {
+        val protectedSet = protectedInvariantSet()
+        val inputAllowed = guardCheck(protectedSet, InvariantCheckDirection.INPUT)
+        val blocked = guardCheck(
+            protectedSet,
+            InvariantCheckDirection.OUTPUT,
+            InvariantCheckDecision.BLOCKED,
+        )
+        every { taskInvariantService.snapshot(activeTask) } returns protectedSet
+        every { invariantGuardService.evaluateInput(any(), protectedSet) } returns inputAllowed
+        every { invariantGuardService.evaluateOutput(any(), any(), protectedSet) } returns blocked
+        every { invariantGuardService.correctiveInstruction(blocked) } returns "Correct it"
+        every { invariantGuardService.maxCorrectiveRetries } returns 1
+        every { invariantGuardService.outputRefusal(blocked) } returns "Controlled output refusal"
+        every { openAiClient.chat(any()) } returnsMany listOf(
+            response("Use MongoDB"),
+            response("Still use MongoDB"),
+        )
+
+        val result = agent.sendMessage(agentRequest("Design persistence"))
+
+        assertEquals("Controlled output refusal", result.content)
+        assertEquals(
+            listOf("Design persistence", "Controlled output refusal"),
+            conversation.messages().map { it.content },
+        )
+        assertTrue(conversation.messages().none { it.content.contains("MongoDB") })
+        verify(exactly = 2) { openAiClient.chat(any()) }
+        verify(exactly = 2) {
+            invariantGuardService.evaluateOutput("Design persistence", any(), protectedSet)
+        }
+    }
+
+    @Test
+    fun `output violation with retry disabled refuses without a corrective main call`() {
+        val protectedSet = protectedInvariantSet()
+        val inputAllowed = guardCheck(protectedSet, InvariantCheckDirection.INPUT)
+        val blocked = guardCheck(
+            protectedSet,
+            InvariantCheckDirection.OUTPUT,
+            InvariantCheckDecision.BLOCKED,
+        )
+        every { taskInvariantService.snapshot(activeTask) } returns protectedSet
+        every { invariantGuardService.evaluateInput(any(), protectedSet) } returns inputAllowed
+        every { invariantGuardService.evaluateOutput(any(), any(), protectedSet) } returns blocked
+        every { invariantGuardService.maxCorrectiveRetries } returns 0
+        every { invariantGuardService.outputRefusal(blocked) } returns "Controlled output refusal"
+        every { openAiClient.chat(any()) } returns response("Use MongoDB")
+
+        val result = agent.sendMessage(agentRequest("Design persistence"))
+
+        assertEquals("Controlled output refusal", result.content)
+        assertTrue(conversation.messages().none { it.content.contains("MongoDB") })
+        verify(exactly = 1) { openAiClient.chat(any()) }
+        verify(exactly = 1) {
+            invariantGuardService.evaluateOutput("Design persistence", "Use MongoDB", protectedSet)
+        }
+        verify(exactly = 0) {
+            conversationRepository.recordUsage(
+                activeTask.id,
+                match { it.purpose == LlmRequestPurpose.INVARIANT_CORRECTIVE_RETRY },
+            )
+        }
+    }
+
+    @Test
     fun `provider options expose configured defaults`() {
         assertEquals(
             listOf(
@@ -650,6 +841,52 @@ class ChatAgentTest {
         assertEquals(ConversationTokenUsage.ZERO, conversation.tokenUsage())
     }
 
+
+    private fun protectedInvariantSet() = TaskInvariantSet(
+        taskId = activeTask.id,
+        taskName = activeTask.name,
+        invariants = listOf(
+            TaskInvariantSnapshot(
+                id = 13,
+                taskId = activeTask.id,
+                taskName = activeTask.name,
+                type = InvariantType.STACK_CONSTRAINT,
+                key = "backend_language",
+                value = "Kotlin",
+                description = null,
+            ),
+        ),
+    )
+
+    private fun guardCheck(
+        invariantSet: TaskInvariantSet,
+        direction: InvariantCheckDirection,
+        decision: InvariantCheckDecision = InvariantCheckDecision.ALLOWED,
+    ) = InvariantGuardEvaluation(
+        invariantSet = invariantSet,
+        result = InvariantCheckResult(
+            decision,
+            direction,
+            if (decision == InvariantCheckDecision.BLOCKED) {
+                listOf(InvariantViolation(13, "Conflicts with the active Task."))
+            } else {
+                emptyList()
+            },
+        ),
+        analysis = null,
+        status = if (decision == InvariantCheckDecision.BLOCKED) {
+            InvariantCheckStatus.SEMANTIC_CONFLICT
+        } else {
+            InvariantCheckStatus.OK
+        },
+    )
+
+    private fun allowedCheck(direction: InvariantCheckDirection) = InvariantGuardEvaluation(
+        invariantSet = emptyInvariantSet,
+        result = InvariantCheckResult(InvariantCheckDecision.ALLOWED, direction, emptyList()),
+        analysis = null,
+        status = InvariantCheckStatus.NO_ACTIVE_INVARIANTS,
+    )
     private fun profile(
         id: Long,
         name: String,

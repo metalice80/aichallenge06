@@ -3,6 +3,7 @@ package com.example.aiagent.memory
 import com.example.aiagent.agent.ChatMessage
 import com.example.aiagent.context.strategy.ContextStrategyType
 import com.example.aiagent.profile.UserProfileSnapshot
+import com.example.aiagent.invariant.TaskInvariantSnapshot
 import com.example.aiagent.task.TaskStateSnapshot
 import java.time.Instant
 
@@ -61,6 +62,7 @@ data class EffectiveContext(
     val userProfile: UserProfileSnapshot?,
     val workingMemory: List<MemoryEntry>,
     val taskState: TaskStateSnapshot? = null,
+    val taskInvariants: List<TaskInvariantSnapshot> = emptyList(),
     val shortTerm: List<ChatMessage>,
     val currentUserMessage: ChatMessage,
     val preparedAt: Instant,

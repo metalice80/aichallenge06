@@ -9,6 +9,7 @@ interface ConversationRepository {
 
     fun save(conversation: Conversation)
     fun save(conversation: Conversation, requestUsage: LlmRequestUsage)
+    fun recordUsage(taskId: Long, requestUsage: LlmRequestUsage)
     fun saveSummary(taskId: Long, summary: ConversationSummary)
 
     fun clear(taskId: Long)

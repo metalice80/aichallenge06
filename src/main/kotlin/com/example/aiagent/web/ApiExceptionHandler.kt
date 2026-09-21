@@ -1,5 +1,8 @@
 package com.example.aiagent.web
 
+import com.example.aiagent.invariant.InvalidTaskInvariantException
+import com.example.aiagent.invariant.TaskInvariantConflictException
+import com.example.aiagent.invariant.TaskInvariantNotFoundException
 import com.example.aiagent.agent.InvalidMessageException
 import com.example.aiagent.llm.InvalidLlmModelException
 import com.example.aiagent.llm.InvalidLlmResponseException
@@ -36,6 +39,18 @@ class ApiExceptionHandler {
     @ExceptionHandler(InvalidUserProfileException::class)
     fun handleInvalidProfile(exception: InvalidUserProfileException): ResponseEntity<ApiError> =
         error(HttpStatus.BAD_REQUEST, exception.message ?: "Некорректный User Profile.")
+
+    @ExceptionHandler(InvalidTaskInvariantException::class)
+    fun handleInvalidInvariant(exception: InvalidTaskInvariantException): ResponseEntity<ApiError> =
+        error(HttpStatus.BAD_REQUEST, exception.message ?: "Некорректный Task Invariant.")
+
+    @ExceptionHandler(TaskInvariantConflictException::class)
+    fun handleInvariantConflict(exception: TaskInvariantConflictException): ResponseEntity<ApiError> =
+        error(HttpStatus.CONFLICT, exception.message ?: "Конфликт активных Task Invariants.")
+
+    @ExceptionHandler(TaskInvariantNotFoundException::class)
+    fun handleInvariantNotFound(exception: TaskInvariantNotFoundException): ResponseEntity<ApiError> =
+        error(HttpStatus.NOT_FOUND, exception.message ?: "Task Invariant не найден.")
 
     @ExceptionHandler(
         HttpMessageNotReadableException::class,

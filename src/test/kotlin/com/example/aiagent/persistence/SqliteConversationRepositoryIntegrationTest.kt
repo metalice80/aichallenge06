@@ -4,6 +4,7 @@ import com.example.aiagent.agent.ChatMessage
 import com.example.aiagent.agent.Conversation
 import com.example.aiagent.agent.ConversationTokenUsage
 import com.example.aiagent.agent.ConversationSummary
+import com.example.aiagent.agent.LlmRequestPurpose
 import com.example.aiagent.agent.LlmRequestUsage
 import com.example.aiagent.agent.Role
 import com.example.aiagent.llm.LlmProvider
@@ -93,6 +94,53 @@ class SqliteConversationRepositoryIntegrationTest {
     }
 
     @Test
+    fun `internal invariant usage persists by purpose without changing main conversation totals`() {
+        val databasePath = tempDirectory.resolve("invariant-usage.db")
+        val repository = repository(databasePath)
+        val conversation = Conversation()
+        repository.save(
+            conversation,
+            LlmRequestUsage(
+                provider = LlmProvider.OPENAI,
+                purpose = LlmRequestPurpose.MAIN_REQUEST,
+                model = "main-test",
+                tokenUsage = TokenUsage(100, 20, 120),
+                responseTimeMs = 40,
+            ),
+        )
+        listOf(
+            LlmRequestPurpose.INVARIANT_INPUT_GUARD,
+            LlmRequestPurpose.INVARIANT_OUTPUT_GUARD,
+            LlmRequestPurpose.INVARIANT_CORRECTIVE_RETRY,
+        ).forEach { purpose ->
+            repository.recordUsage(
+                1,
+                LlmRequestUsage(
+                    provider = LlmProvider.OPENAI,
+                    purpose = purpose,
+                    model = "guard-test",
+                    tokenUsage = TokenUsage(10, 5, 15),
+                    responseTimeMs = 5,
+                ),
+            )
+        }
+
+        assertEquals(ConversationTokenUsage(100, 20, 120), repository(databasePath).load(1).tokenUsage())
+        assertEquals(
+            listOf(
+                LlmRequestPurpose.MAIN_REQUEST.name,
+                LlmRequestPurpose.INVARIANT_INPUT_GUARD.name,
+                LlmRequestPurpose.INVARIANT_OUTPUT_GUARD.name,
+                LlmRequestPurpose.INVARIANT_CORRECTIVE_RETRY.name,
+            ),
+            jdbcTemplate(databasePath).queryForList(
+                "SELECT purpose FROM llm_request_usage ORDER BY id",
+                String::class.java,
+            ),
+        )
+    }
+
+    @Test
     fun `latest rolling summary and cursor survive repository recreation`() {
         val databasePath = tempDirectory.resolve("summary-restart.db")
         val firstRepository = repository(databasePath)
@@ -153,6 +201,46 @@ class SqliteConversationRepositoryIntegrationTest {
         assertEquals(ConversationTokenUsage.ZERO, restoredConversation.tokenUsage())
         assertNull(restoredConversation.summary())
         assertEquals(0, jdbcTemplate(databasePath).queryForObject("SELECT COUNT(*) FROM llm_request_usage", Int::class.java))
+    }
+
+    @Test
+    fun `usage migration preserves legacy rows as main request purpose`() {
+        val databasePath = tempDirectory.resolve("legacy-usage-purpose.db")
+        val jdbc = jdbcTemplate(databasePath)
+        jdbc.execute(
+            """
+            CREATE TABLE llm_request_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                total_tokens INTEGER,
+                response_time_ms INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """.trimIndent(),
+        )
+        jdbc.update(
+            """
+            INSERT INTO llm_request_usage(
+                task_id, provider, model, input_tokens, output_tokens,
+                total_tokens, response_time_ms, created_at
+            ) VALUES (1, 'OPENAI', 'legacy-main', 40, 10, 50, 100, '2026-01-01T00:00:00Z')
+            """.trimIndent(),
+        )
+
+        val restored = repository(databasePath).load(1)
+
+        assertEquals(ConversationTokenUsage(40, 10, 50), restored.tokenUsage())
+        assertEquals(
+            LlmRequestPurpose.MAIN_REQUEST.name,
+            jdbc.queryForObject(
+                "SELECT purpose FROM llm_request_usage WHERE id = 1",
+                String::class.java,
+            ),
+        )
     }
 
     @Test

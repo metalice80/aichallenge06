@@ -1,5 +1,6 @@
 package com.example.aiagent.persistence
 
+import com.example.aiagent.invariant.TaskInvariantSnapshot
 import com.example.aiagent.agent.ChatMessage
 import com.example.aiagent.context.strategy.ContextStrategyType
 import com.example.aiagent.memory.EffectiveContext
@@ -76,6 +77,7 @@ class SqliteMemoryRepository(
         )
         addColumnIfMissing("effective_context", "user_profile", "TEXT")
         addColumnIfMissing("effective_context", "task_state", "TEXT")
+        addColumnIfMissing("effective_context", "task_invariants", "TEXT NOT NULL DEFAULT '[]'")
     }
 
     override fun findWorking(taskId: Long): List<MemoryEntry> = jdbcTemplate.query(
@@ -149,8 +151,8 @@ class SqliteMemoryRepository(
             """
             INSERT INTO effective_context(
                 task_id, strategy, system_prompt, long_term_memory, user_profile,
-                working_memory, task_state, short_term, current_user_message, prepared_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                working_memory, task_state, task_invariants, short_term, current_user_message, prepared_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET
                 strategy = excluded.strategy,
                 system_prompt = excluded.system_prompt,
@@ -158,6 +160,7 @@ class SqliteMemoryRepository(
                 user_profile = excluded.user_profile,
                 working_memory = excluded.working_memory,
                 task_state = excluded.task_state,
+                task_invariants = excluded.task_invariants,
                 short_term = excluded.short_term,
                 current_user_message = excluded.current_user_message,
                 prepared_at = excluded.prepared_at
@@ -169,6 +172,7 @@ class SqliteMemoryRepository(
             context.userProfile?.let(jsonMapper::writeValueAsString),
             jsonMapper.writeValueAsString(context.workingMemory),
             context.taskState?.let(jsonMapper::writeValueAsString),
+            jsonMapper.writeValueAsString(context.taskInvariants),
             jsonMapper.writeValueAsString(context.shortTerm),
             jsonMapper.writeValueAsString(context.currentUserMessage),
             context.preparedAt.toString(),
@@ -196,6 +200,10 @@ class SqliteMemoryRepository(
                 taskState = resultSet.getString("task_state")?.let { value ->
                     jsonMapper.readValue(value, TaskStateSnapshot::class.java)
                 },
+                taskInvariants = jsonMapper.readValue(
+                    resultSet.getString("task_invariants"),
+                    Array<TaskInvariantSnapshot>::class.java,
+                ).toList(),
                 shortTerm = jsonMapper.readValue(
                     resultSet.getString("short_term"),
                     Array<ChatMessage>::class.java,

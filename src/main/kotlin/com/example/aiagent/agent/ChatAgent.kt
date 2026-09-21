@@ -5,10 +5,20 @@ import com.example.aiagent.context.EffectiveContextBuilder
 import com.example.aiagent.context.branch.ConversationBranch
 import com.example.aiagent.context.branch.ConversationBranchService
 import com.example.aiagent.context.strategy.ContextStrategyResolver
+import com.example.aiagent.invariant.InvariantCheckDecision
+import com.example.aiagent.invariant.InvariantCheckDirection
+import com.example.aiagent.invariant.InvariantCheckOutcome
+import com.example.aiagent.invariant.InvariantCheckStatus
+import com.example.aiagent.invariant.InvariantGuardException
+import com.example.aiagent.invariant.InvariantGuardService
+import com.example.aiagent.invariant.TaskInvariantService
+import com.example.aiagent.invariant.TaskInvariantSet
 import com.example.aiagent.context.strategy.ContextStrategyType
 import com.example.aiagent.llm.InvalidLlmResponseException
+import com.example.aiagent.llm.LlmClient
 import com.example.aiagent.llm.LlmClientResolver
 import com.example.aiagent.llm.LlmRequest
+import com.example.aiagent.llm.TokenUsage
 import com.example.aiagent.memory.MemoryInspector
 import com.example.aiagent.memory.MemoryService
 import com.example.aiagent.persistence.ConversationRepository
@@ -34,6 +44,8 @@ class ChatAgent(
     private val branchService: ConversationBranchService,
     private val taskService: TaskService,
     private val taskStateService: TaskStateService,
+    private val taskInvariantService: TaskInvariantService,
+    private val invariantGuardService: InvariantGuardService,
     private val taskStateCoordinator: TaskStateCoordinator,
     private val memoryService: MemoryService,
     private val effectiveContextBuilder: EffectiveContextBuilder,
@@ -65,10 +77,77 @@ class ChatAgent(
             throw InvalidMessageException("Paused Task must be resumed before continuing")
         }
 
+        val userMessage = ChatMessage(Role.USER, content)
+        val invariantSet = try {
+            taskInvariantService.snapshot(initialTask)
+        } catch (exception: RuntimeException) {
+            val unavailableSet = TaskInvariantSet.empty(initialTask.id, initialTask.name)
+            invariantGuardService.recordFailure(
+                unavailableSet,
+                InvariantCheckDirection.INPUT,
+                content,
+                correctiveRetries = 0,
+                outcome = InvariantCheckOutcome.REFUSED,
+                errorCode = "SNAPSHOT_${exception.javaClass.simpleName}",
+            )
+            return guardRefusalResponse(request, invariantGuardService.technicalRefusal())
+        }
+        val inputCheck = try {
+            invariantGuardService.evaluateInput(content, invariantSet)
+        } catch (exception: InvariantGuardException) {
+            invariantGuardService.recordFailure(
+                invariantSet,
+                InvariantCheckDirection.INPUT,
+                content,
+                correctiveRetries = 0,
+                outcome = InvariantCheckOutcome.REFUSED,
+                failure = exception,
+            )
+            return guardRefusalResponse(request, invariantGuardService.technicalRefusal())
+        }
+        if (inputCheck.result.decision == InvariantCheckDecision.BLOCKED) {
+            try {
+                invariantGuardService.record(
+                    inputCheck,
+                    content,
+                    correctiveRetries = 0,
+                    outcome = InvariantCheckOutcome.REFUSED,
+                )
+            } catch (exception: InvariantGuardException) {
+                invariantGuardService.recordFailure(
+                    invariantSet,
+                    InvariantCheckDirection.INPUT,
+                    content,
+                    correctiveRetries = 0,
+                    outcome = InvariantCheckOutcome.REFUSED,
+                    failure = exception,
+                )
+                return guardRefusalResponse(request, invariantGuardService.technicalRefusal())
+            }
+            return guardRefusalResponse(request, invariantGuardService.semanticRefusal(inputCheck))
+        }
+        try {
+            invariantGuardService.record(
+                inputCheck,
+                content,
+                correctiveRetries = 0,
+                outcome = InvariantCheckOutcome.NOT_SENT,
+            )
+        } catch (exception: InvariantGuardException) {
+            invariantGuardService.recordFailure(
+                invariantSet,
+                InvariantCheckDirection.INPUT,
+                content,
+                correctiveRetries = 0,
+                outcome = InvariantCheckOutcome.REFUSED,
+                failure = exception,
+            )
+            return guardRefusalResponse(request, invariantGuardService.technicalRefusal())
+        }
+
         val previousMessages = conversation.messages()
         val previousTokenUsage = conversation.tokenUsage()
         val previousSummary = conversation.summary()
-        val userMessage = ChatMessage(Role.USER, content)
         val task = taskStateCoordinator.analyzeBeforeMainRequest(initialTask, userMessage)
         val contextStrategy = contextStrategyResolver.resolve(request.contextStrategy)
         val contextPlan = contextStrategy.buildContext(conversation)
@@ -79,6 +158,7 @@ class ChatAgent(
             strategy = request.contextStrategy,
             memoryContext = memoryContext,
             contextPlan = contextPlan,
+            invariantSet = invariantSet,
             currentUserMessage = userMessage,
         )
         val llmRequest = LlmRequest(
@@ -91,12 +171,20 @@ class ChatAgent(
         val llmClient = llmClientResolver.resolve(request.provider)
         val llmResponse = llmClient.chat(llmRequest)
         val responseTimeMs = (System.nanoTime() - startedAt) / NANOS_PER_MILLISECOND
-        val assistantContent = llmResponse.content.trim()
-        if (assistantContent.isEmpty()) {
+        val candidate = llmResponse.content.trim()
+        if (candidate.isEmpty()) {
             throw InvalidLlmResponseException(request.provider)
         }
 
-        val assistantMessage = ChatMessage(Role.ASSISTANT, assistantContent)
+        val deliveredContent = guardOutput(
+            request = request,
+            task = task,
+            invariantSet = invariantSet,
+            preparedMessages = preparedContext.messages,
+            candidate = candidate,
+            llmClient = llmClient,
+        )
+        val assistantMessage = ChatMessage(Role.ASSISTANT, deliveredContent)
         conversation.addAll(listOf(userMessage, assistantMessage))
         conversation.addUsage(llmResponse.usage)
         val requestUsage = LlmRequestUsage(
@@ -116,13 +204,190 @@ class ChatAgent(
 
         return AgentResponse(
             provider = request.provider,
-            content = assistantContent,
+            content = deliveredContent,
             model = llmResponse.model,
             currentUsage = llmResponse.usage,
             conversationUsage = conversation.tokenUsage(),
             responseTimeMs = responseTimeMs,
         )
     }
+
+    private fun guardOutput(
+        request: AgentRequest,
+        task: AgentTask,
+        invariantSet: TaskInvariantSet,
+        preparedMessages: List<ChatMessage>,
+        candidate: String,
+        llmClient: LlmClient,
+    ): String {
+        val firstCheck = try {
+            invariantGuardService.evaluateOutput(request.message.trim(), candidate, invariantSet)
+        } catch (exception: InvariantGuardException) {
+            invariantGuardService.recordFailure(
+                invariantSet,
+                InvariantCheckDirection.OUTPUT,
+                request.message,
+                correctiveRetries = 0,
+                outcome = InvariantCheckOutcome.REFUSED,
+                failure = exception,
+            )
+            return invariantGuardService.outputRefusal(null)
+        }
+        if (firstCheck.result.decision == InvariantCheckDecision.ALLOWED) {
+            return try {
+                invariantGuardService.record(
+                    firstCheck,
+                    request.message,
+                    correctiveRetries = 0,
+                    outcome = InvariantCheckOutcome.DELIVERED,
+                )
+                candidate
+            } catch (exception: InvariantGuardException) {
+                invariantGuardService.recordFailure(
+                    invariantSet,
+                    InvariantCheckDirection.OUTPUT,
+                    request.message,
+                    correctiveRetries = 0,
+                    outcome = InvariantCheckOutcome.REFUSED,
+                    failure = exception,
+                )
+                invariantGuardService.outputRefusal(null)
+            }
+        }
+        if (invariantGuardService.maxCorrectiveRetries == 0) {
+            return recordOutputRefusal(firstCheck, request.message, correctiveRetries = 0)
+        }
+        try {
+            invariantGuardService.record(
+                firstCheck,
+                request.message,
+                correctiveRetries = 0,
+                outcome = InvariantCheckOutcome.NOT_SENT,
+            )
+        } catch (exception: InvariantGuardException) {
+            invariantGuardService.recordFailure(
+                invariantSet,
+                InvariantCheckDirection.OUTPUT,
+                request.message,
+                correctiveRetries = 0,
+                outcome = InvariantCheckOutcome.REFUSED,
+                failure = exception,
+            )
+            return invariantGuardService.outputRefusal(null)
+        }
+
+        val correctiveResponse = try {
+            val startedAt = System.nanoTime()
+            val response = llmClient.chat(
+                LlmRequest(
+                    model = request.model.trim(),
+                    messages = preparedMessages + listOf(
+                        ChatMessage(Role.ASSISTANT, candidate),
+                        ChatMessage(Role.SYSTEM, invariantGuardService.correctiveInstruction(firstCheck)),
+                    ),
+                ),
+            )
+            val responseTimeMs = (System.nanoTime() - startedAt) / NANOS_PER_MILLISECOND
+            if (response.content.isBlank()) {
+                throw InvalidLlmResponseException(request.provider)
+            }
+            conversationRepository.recordUsage(
+                task.id,
+                LlmRequestUsage(
+                    provider = request.provider,
+                    purpose = LlmRequestPurpose.INVARIANT_CORRECTIVE_RETRY,
+                    model = response.model,
+                    tokenUsage = response.usage,
+                    responseTimeMs = responseTimeMs,
+                ),
+            )
+            response
+        } catch (exception: RuntimeException) {
+            invariantGuardService.recordFailure(
+                invariantSet,
+                InvariantCheckDirection.OUTPUT,
+                request.message,
+                correctiveRetries = 1,
+                outcome = InvariantCheckOutcome.REFUSED,
+                errorCode = "CORRECTIVE_${exception.javaClass.simpleName}",
+            )
+            return invariantGuardService.outputRefusal(firstCheck)
+        }
+        val correctedCandidate = correctiveResponse.content.trim()
+        val correctedCheck = try {
+            invariantGuardService.evaluateOutput(
+                request.message.trim(),
+                correctedCandidate,
+                invariantSet,
+            )
+        } catch (exception: InvariantGuardException) {
+            invariantGuardService.recordFailure(
+                invariantSet,
+                InvariantCheckDirection.OUTPUT,
+                request.message,
+                correctiveRetries = 1,
+                outcome = InvariantCheckOutcome.REFUSED,
+                failure = exception,
+            )
+            return invariantGuardService.outputRefusal(firstCheck)
+        }
+        if (correctedCheck.result.decision == InvariantCheckDecision.BLOCKED) {
+            return recordOutputRefusal(correctedCheck, request.message, correctiveRetries = 1)
+        }
+        return try {
+            invariantGuardService.record(
+                correctedCheck,
+                request.message,
+                correctiveRetries = 1,
+                outcome = InvariantCheckOutcome.DELIVERED,
+                status = InvariantCheckStatus.OUTPUT_CORRECTED,
+            )
+            correctedCandidate
+        } catch (exception: InvariantGuardException) {
+            invariantGuardService.recordFailure(
+                invariantSet,
+                InvariantCheckDirection.OUTPUT,
+                request.message,
+                correctiveRetries = 1,
+                outcome = InvariantCheckOutcome.REFUSED,
+                failure = exception,
+            )
+            invariantGuardService.outputRefusal(null)
+        }
+    }
+
+    private fun recordOutputRefusal(
+        evaluation: com.example.aiagent.invariant.InvariantGuardEvaluation,
+        request: String,
+        correctiveRetries: Int,
+    ): String = try {
+        invariantGuardService.record(
+            evaluation,
+            request,
+            correctiveRetries,
+            InvariantCheckOutcome.REFUSED,
+        )
+        invariantGuardService.outputRefusal(evaluation)
+    } catch (exception: InvariantGuardException) {
+        invariantGuardService.recordFailure(
+            evaluation.invariantSet,
+            InvariantCheckDirection.OUTPUT,
+            request,
+            correctiveRetries,
+            InvariantCheckOutcome.REFUSED,
+            failure = exception,
+        )
+        invariantGuardService.outputRefusal(null)
+    }
+
+    private fun guardRefusalResponse(request: AgentRequest, content: String) = AgentResponse(
+        provider = request.provider,
+        content = content,
+        model = request.model.trim(),
+        currentUsage = TokenUsage(0, 0, 0),
+        conversationUsage = conversation.tokenUsage(),
+        responseTimeMs = 0,
+    )
 
     @Synchronized
     override fun history(): List<ChatMessage> = conversation.messages()

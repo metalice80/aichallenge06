@@ -18,29 +18,32 @@ Spring AI, LangChain и LangChain4j не используются.
 ## Архитектура
 
 ```text
-Browser ─► ChatController/UserProfileController ─► ChatAgent ─► LlmClientResolver ─► OpenAI/OpenRouter
-                                                       │
-                                                       ├─► EffectiveContextBuilder
-                                                       │     ├─► UserProfileService ─► UserProfileRepository
-                                                       │     ├─► MemoryService ─► MemoryRepository
-                                                       │     └─► ContextStrategyResolver
-                                                       ├─► TaskService / TaskStateService
-                                                       │     ├─► TaskStateMachine
-                                                       │     └─► TaskRepository ─► SQLite
-                                                       ├─► TaskProgressAnalyzer ─► LlmClientResolver
-                                                       ├─► MemoryExtractor ─► LlmClientResolver
-                                                       └─► repositories ─► SQLite
+Browser ─► ChatController/UserProfileController/TaskInvariantController ─► ChatAgent ─► LlmClientResolver ─► OpenAI/OpenRouter
+                                                                        │
+                                                                        ├─► InvariantGuardService
+                                                                        │     └─► InvariantConflictAnalyzer ─► LlmClientResolver
+                                                                        ├─► TaskInvariantService ─► TaskInvariantRepository ─► SQLite
+                                                                        ├─► EffectiveContextBuilder
+                                                                        │     ├─► UserProfileService ─► UserProfileRepository
+                                                                        │     ├─► MemoryService ─► MemoryRepository
+                                                                        │     └─► ContextStrategyResolver
+                                                                        ├─► TaskService / TaskStateService
+                                                                        │     ├─► TaskStateMachine
+                                                                        │     └─► TaskRepository ─► SQLite
+                                                                        ├─► TaskProgressAnalyzer ─► LlmClientResolver
+                                                                        └─► MemoryExtractor ─► LlmClientResolver
 ```
 
 - `ChatController` отвечает за REST-контракт, validation и вызов provider-neutral `Agent`.
 - `ChatAgent` не знает URL, API keys или HTTP headers providers. Для каждого запроса он независимо выбирает `LlmClient` и `ContextStrategy`.
 - Persistent `Task` определяет текущие `Conversation`, branch graph, token usage, Sticky Facts, Working Memory и независимый FSM state. Persistent `UserProfile` — независимое глобальное измерение: переключение Profile не меняет Task или memory.
 - `TaskStateMachine` содержит только детерминированную transition table. `TaskStateService` валидирует события, pause/resume и атомарно сохраняет Task вместе с state history.
-- `EffectiveContextBuilder` — единственный pipeline основного LLM context. Он объединяет system prompt, Long-Term, explicit User Profile, Working, Task State, effective Short-Term и current message.
-- Конфликты разрешаются как `current USER > Task State/Working > User Profile > Long-Term > application defaults`.
+- `EffectiveContextBuilder` — единственный pipeline основного LLM context. Он объединяет system prompt, immutable snapshot enabled Task Invariants, Long-Term, explicit User Profile, Working, Task State, effective Short-Term и current message.
+- Task Invariants образуют hard boundary. Обычный приоритет `current USER > Task State/Working > User Profile > Long-Term > application defaults` действует только внутри допустимого пространства.
+- Input Guard выполняется до `TaskProgressAnalyzer`, Memory Extractor, main LLM и любых изменений Conversation/FSM. Output Guard проверяет candidate до показа, допускает максимум один corrective retry и повторно проверяет исправленный ответ.
 - `MemoryExtractor`, Facts Extractor, Rolling Summary и `TaskProgressAnalyzer` используют собственные prompts и не получают User Profile. Перед основным LLM request analyzer возвращает proposal; persistent FSM может изменить только `TaskStateService`.
-- `SqliteConversationRepository` атомарно сохраняет завершённые пары `USER + ASSISTANT` и provider-reported usage в scope активной Task; profile tokens вручную не прибавляются.
-- Ошибка Memory Extractor или Task Progress Analyzer не отменяет успешный основной ответ и не изменяет существующее состояние. При ошибке сохранения Conversation in-memory messages и накопленная статистика откатываются.
+- `SqliteConversationRepository` атомарно сохраняет завершённые пары `USER + ASSISTANT`. Usage записывается с purpose `MAIN_REQUEST`, `INVARIANT_INPUT_GUARD`, `INVARIANT_OUTPUT_GUARD` или `INVARIANT_CORRECTIVE_RETRY`; Conversation totals учитывают только main requests.
+- Guard/provider/parser/diagnostic failure при active invariants обрабатывается fail-closed: main LLM и mutable pipeline не запускаются для входного запроса, а нарушающий output не сохраняется и не показывается.
 
 ## Настройка
 
@@ -77,6 +80,10 @@ export OPENROUTER_MODEL="openai/gpt-4o-mini"
 | `MEMORY_ENABLED` | `true` | включает extraction и добавление memory layers в main context |
 | `MEMORY_EXTRACTOR_PROVIDER` | `OPENAI` | provider отдельного Memory Extractor |
 | `MEMORY_EXTRACTOR_MODEL` | `gpt-4o-mini` | model отдельного Memory Extractor |
+| `INVARIANTS_GUARD_ENABLED` | `true` | включает semantic Input/Output Guard; invariants остаются в main context даже при `false` |
+| `INVARIANTS_GUARD_PROVIDER` | `OPENAI` | отдельный provider semantic guard |
+| `INVARIANTS_GUARD_MODEL` | `gpt-5-nano` | отдельная model semantic guard |
+| `INVARIANTS_GUARD_MAX_CORRECTIVE_RETRIES` | `1` | число corrective retries; validation разрешает только `0` или `1` |
 | `AGENT_DB_PATH` | `./data/agent.db` | путь к SQLite database |
 
 API keys не включаются в frontend, REST responses или логи. System prompt находится в `src/main/resources/application.yml`.
@@ -229,6 +236,14 @@ Extractor возвращает один JSON:
 
 Upsert заменяет значение по стабильному key; delete удаляет key. Изменения двух слоёв применяются одной SQLite transaction. Memory Inspector показывает effective Short-Term, Working и Long-Term; `Last Memory Update` показывает added/updated/deleted; `Effective Context` показывает логические секции последнего main request. Похожие JSON parsing и `LlmClientResolver` infrastructure разделяются со Sticky Facts. Секреты в Effective Context маскируются.
 
+### Task Invariants
+
+`TaskInvariant` — persistent hard constraint одной Task. Типы: `ARCHITECTURE`, `TECHNICAL_DECISION`, `STACK_CONSTRAINT`, `BUSINESS_RULE`, `OTHER`. Только enabled записи входят в immutable snapshot одного message cycle; тот же snapshot используется Input Guard, Effective Context, Output Guard, corrective retry и Inspector.
+
+Create/edit/enable/disable/delete доступны только через панель `INVARIANTS` и dedicated REST API. Chat, Memory Extractor, Profile switch, reset и FSM transitions invariants не меняют. В одной Task нельзя сохранить две enabled записи с одинаковым нормализованным key; SQLite partial unique index обеспечивает то же правило при concurrent operations.
+
+Semantic guard использует отдельные provider/model settings через существующий `LlmClientResolver`. Educational/comparative/hypothetical вопросы разрешены, если они не применяют конфликтующее изменение к текущей Task. При semantic conflict отказ называет invariant и причину. `LAST INVARIANT CHECK` хранит sanitized request excerpt, exact snapshot, violations, outcome, typed status/error code, guard usage и latency.
+
 ### Rolling Context Compression
 
 Существующая реализация Rolling Summary и её configuration properties сохранены отдельно; persisted state теперь task-scoped в `task_conversation_summary`. Rolling Summary намеренно не зарегистрирована как одна из трёх selectable strategies и не добавляется к их LLM contexts: Sliding Window, Sticky Facts и Branching никогда не смешиваются с summary/cursor.
@@ -239,6 +254,8 @@ SQLite schema содержит:
 
 - `agent_task`, `active_task_state` — Task lifecycle, formal FSM state и выбранная Task;
 - `task_state_history` — task-scoped transitions, progress updates, Pause и Resume;
+- `task_invariant` — task-scoped constraints; partial unique index запрещает одинаковый enabled key;
+- `last_invariant_check` — последний diagnostic result Input/Output Guard по Task;
 - `user_profile`, `active_profile_state` — Profile settings и глобально выбранный Profile;
 - `chat_message`, `llm_request_usage` — task-scoped Conversation и token usage;
 - `task_conversation_summary` — task-scoped Rolling Summary state;
@@ -247,11 +264,11 @@ SQLite schema содержит:
 - `working_memory` — key-value entries с составным ключом `(task_id, key)`;
 - `long_term_memory` — глобальные key-value entries;
 - `last_memory_update` — последняя классификация сообщения по Task;
-- `effective_context` — sanitized logical snapshot последнего main request по Task, включая фактически использованные User Profile и Task State.
+- `effective_context` — sanitized logical snapshot последнего main request по Task, включая фактически использованные Task Invariants, User Profile и Task State.
 
 Legacy `conversation_summary` и `conversation_fact` сохраняются только для безопасной migration существующей базы. При первом запуске их данные копируются в task-scoped таблицы default Task. Если legacy summary cursor превышает число мигрированных сообщений, повреждённый summary удаляется, а Conversation и usage сохраняются.
 
-System prompt в базу Conversation не записывается и добавляется Agent при каждом LLM-запросе. Накопленные totals вычисляются по Task как суммы persisted usage.
+System prompt в базу Conversation не записывается и добавляется Agent при каждом LLM-запросе. Накопленные Conversation totals вычисляются по Task только из usage purpose `MAIN_REQUEST`; guard и corrective usage остаются отдельно доступными для диагностики.
 
 Чтобы проверить восстановление:
 
@@ -267,7 +284,7 @@ System prompt в базу Conversation не записывается и доба
 export AGENT_DB_PATH="./data/local-agent.db"
 ```
 
-`Сбросить чат` очищает только Short-Term state активной Task: messages, usage, rolling summary, Sticky Facts и её branch graph. Working, Long-Term и Task FSM state не удаляются. Для memory layers в UI есть отдельные действия; очистка Working также не меняет FSM, а очистка Long-Term требует confirmation.
+`Сбросить чат` очищает только Short-Term state активной Task: messages, usage, rolling summary, Sticky Facts и её branch graph. Working, Long-Term, Task FSM state и Task Invariants не удаляются. Для memory layers в UI есть отдельные действия; очистка Working также не меняет FSM или invariants, а очистка Long-Term требует confirmation.
 
 ## Запуск
 
@@ -320,6 +337,20 @@ POST /api/chat/memory/long-term/clear
 ```
 
 `events` принимает `event` и optional progress proposal; stage-specific UI controls отправляют именно события (`PLAN_APPROVED`, `EXECUTION_COMPLETED`, `VALIDATION_PASSED`, `VALIDATION_FAILED`), а не целевой stage. `progress` обновляет только `currentStep`/`expectedAction`. Endpoint `complete` применяет `VALIDATION_PASSED` через тот же `TaskStateService` и поэтому отклоняется вне `VALIDATION`. `GET /memory` возвращает три слоя, Last Memory Update и sanitized Effective Context с отдельным Task State block. Working clear действует только на выбранную Task; Long-Term clear глобален.
+
+### Task Invariants
+
+```http
+GET    /api/tasks/{taskId}/invariants
+GET    /api/tasks/{taskId}/invariants/{invariantId}
+POST   /api/tasks/{taskId}/invariants
+PUT    /api/tasks/{taskId}/invariants/{invariantId}
+PATCH  /api/tasks/{taskId}/invariants/{invariantId}/enabled
+DELETE /api/tasks/{taskId}/invariants/{invariantId}
+GET    /api/tasks/{taskId}/invariant-checks/last
+```
+
+Path `taskId` — обязательная isolation boundary. Duplicate enabled key возвращает `409`, invalid payload — `400`, неизвестная Task/invariant — `404`. Last Check endpoint возвращает `204`, пока проверок не было.
 
 ### Context strategies и branches
 
@@ -380,7 +411,7 @@ OpenRouter использует тот же контракт с provider `OPENRO
 }
 ```
 
-`currentUsage` относится только к последнему успешному вызову. `conversationUsage` — сумма provider-reported usage всех успешных вызовов с момента последнего reset, включая повторно отправленные модели токены истории. Значения current usage могут быть `null`, если provider их не вернул; приложение не выполняет приблизительный локальный подсчёт.
+`currentUsage` и `conversationUsage` относятся только к main LLM requests. Internal Input/Output Guard и corrective retry usage сохраняются отдельно по purpose и показываются в `LAST INVARIANT CHECK`; они не увеличивают main counters. Значения usage могут быть `null`, если provider их не вернул; приложение не выполняет приблизительный локальный подсчёт.
 
 ### Сброс диалога
 
@@ -407,4 +438,4 @@ API возвращает JSON вида:
 ./gradlew build
 ```
 
-Unit tests проверяют providers/plugins, provider token usage, Context Strategies, internal extractors/analyzer, pre-main analyzer ordering, Profile validation, FSM transition table, invalid events, Pause/Resume, Effective Context и semantic priority. SQLite integration tests проверяют общий `TaskStateMachine` для chat proposals и ручных events, полный FSM path, Task/Profile switch, Task state isolation/history/restart/atomicity, Profile edit/restart, Working isolation, global Long-Term, independent reset и schema migrations.
+Unit tests проверяют providers/plugins, Context Strategies, invariant validation/strict structured parser/fail-closed guards, pre-main ordering, corrective retry, Profile validation, FSM transition table, Pause/Resume, Effective Context и semantic priority. SQLite/Spring integration tests проверяют invariant schema/unique index/concurrency/CRUD/restart/REST/usage purposes, exact Inspector snapshot, общий `TaskStateMachine`, Task/Profile switch, state isolation/history/atomicity, Working/Long-Term и independent reset. `BookingServiceInvariantAcceptanceTest` выполняет allowed, educational, пять blocked, management, correction, repeated violation, analyzer failure и lifecycle scenarios только через deterministic fake LLM.

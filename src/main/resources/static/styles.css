@@ -175,6 +175,72 @@ h2 {
     display: none;
 }
 
+.invariants-panel {
+    display: grid;
+    gap: 16px;
+    border-bottom: 1px solid var(--border);
+    padding: 20px 24px;
+    background: var(--surface);
+}
+
+.invariant-list {
+    display: grid;
+    gap: 10px;
+}
+
+.invariant-card {
+    display: grid;
+    gap: 8px;
+    border: 1px solid var(--border);
+    border-left: 4px solid #17a673;
+    border-radius: 12px;
+    padding: 12px 14px;
+    background: var(--surface-muted);
+}
+
+.invariant-card.disabled {
+    border-left-color: var(--muted);
+    opacity: 0.72;
+}
+
+.invariant-card-heading,
+.invariant-card-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.invariant-card-type {
+    color: var(--accent-dark);
+    font-size: 0.75rem;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+}
+
+.invariant-card-value,
+.invariant-card-description {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.invariant-card-value {
+    font-weight: 700;
+}
+
+.invariant-card-description {
+    color: var(--muted);
+    font-size: 0.85rem;
+}
+
+.invariant-enabled-field {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-weight: 700;
+}
+
 .profile-controls {
     display: grid;
     grid-template-columns: minmax(240px, 1fr) auto auto;
@@ -710,7 +776,8 @@ textarea:disabled {
         padding: 16px;
     }
 
-    .task-state-panel {
+    .task-state-panel,
+    .invariants-panel {
         padding: 16px;
     }
 

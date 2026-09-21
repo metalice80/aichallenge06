@@ -9,6 +9,7 @@ import com.example.aiagent.context.branch.ConversationBranch
 import com.example.aiagent.context.strategy.ContextStrategyType
 import com.example.aiagent.agent.LlmProviderOption
 import com.example.aiagent.agent.Role
+import com.example.aiagent.invariant.TaskInvariantSnapshot
 import com.example.aiagent.llm.LlmProvider
 import com.example.aiagent.llm.TokenUsage
 import com.example.aiagent.memory.EffectiveContext
@@ -318,6 +319,28 @@ data class LastMemoryUpdateResponse(
     }
 }
 
+data class TaskInvariantSnapshotResponse(
+    val id: Long,
+    val taskId: Long,
+    val taskName: String,
+    val type: String,
+    val key: String,
+    val value: String,
+    val description: String?,
+) {
+    companion object {
+        fun from(invariant: TaskInvariantSnapshot) = TaskInvariantSnapshotResponse(
+            id = invariant.id,
+            taskId = invariant.taskId,
+            taskName = invariant.taskName,
+            type = invariant.type.name,
+            key = invariant.key,
+            value = invariant.value,
+            description = invariant.description,
+        )
+    }
+}
+
 data class EffectiveContextResponse(
     val strategy: ContextStrategyType,
     val systemPrompt: String,
@@ -325,6 +348,7 @@ data class EffectiveContextResponse(
     val userProfile: UserProfileResponse?,
     val workingMemory: List<MemoryEntryResponse>,
     val taskState: TaskStateSnapshotResponse?,
+    val taskInvariants: List<TaskInvariantSnapshotResponse>,
     val shortTerm: List<ChatHistoryResponse>,
     val currentUserMessage: ChatHistoryResponse,
     val preparedAt: Instant,
@@ -337,6 +361,7 @@ data class EffectiveContextResponse(
             userProfile = context.userProfile?.let(UserProfileResponse::from),
             workingMemory = context.workingMemory.map(MemoryEntryResponse::from),
             taskState = context.taskState?.let(TaskStateSnapshotResponse::from),
+            taskInvariants = context.taskInvariants.map(TaskInvariantSnapshotResponse::from),
             shortTerm = context.shortTerm.map(ChatHistoryResponse::from),
             currentUserMessage = ChatHistoryResponse.from(context.currentUserMessage),
             preparedAt = context.preparedAt,
