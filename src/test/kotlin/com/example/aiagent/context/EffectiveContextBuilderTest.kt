@@ -118,6 +118,9 @@ class EffectiveContextBuilderTest {
         assertTrue(prepared.messages[3].content.startsWith("WORKING MEMORY for Task \"Payment Service\""))
         assertTrue(prepared.messages[3].content.contains("language = Java"))
         assertTrue(prepared.messages[3].content.contains("overrides User Profile"))
+        assertTrue(prepared.messages[4].content.startsWith("TASK STATE"))
+        assertTrue(prepared.messages[4].content.contains("Stage: PLANNING"))
+        assertTrue(prepared.messages[4].content.contains("Current Step: Define goals, requirements, and execution plan"))
         assertEquals(ChatMessage(Role.USER, "Answer in English."), prepared.messages.last())
         assertEquals("Developer", prepared.diagnostic.userProfile?.name)
         assertEquals(listOf(MemoryEntry("language", "Java"), MemoryEntry("database", "PostgreSQL")), prepared.diagnostic.workingMemory)
@@ -148,6 +151,35 @@ class EffectiveContextBuilderTest {
         assertTrue(prepared.messages[2].content.contains("database = PostgreSQL"))
         assertTrue(prepared.messages[2].content.contains("overrides User Profile"))
         assertTrue(prepared.messages.none { it.content.contains("language = Java") })
+    }
+
+    @Test
+    fun `Task state stays in effective context when sliding window has no progress messages`() {
+        val executionTask = task.copy(
+            stage = com.example.aiagent.task.TaskStage.EXECUTION,
+            currentStep = "Implement persistence layer",
+            expectedActionType = com.example.aiagent.task.ExpectedActionType.AGENT_ACTION,
+            expectedActionDescription = "Propose repository implementation",
+            paused = true,
+        )
+
+        val prepared = builder.build(
+            task = executionTask,
+            profile = null,
+            strategy = ContextStrategyType.SLIDING_WINDOW,
+            memoryContext = MemoryContext(emptyList(), emptyList()),
+            contextPlan = ContextPlan(emptyList()),
+            currentUserMessage = ChatMessage(Role.USER, "Продолжай."),
+        )
+
+        assertEquals(3, prepared.messages.size)
+        assertTrue(prepared.messages[1].content.startsWith("TASK STATE"))
+        assertTrue(prepared.messages[1].content.contains("Stage: EXECUTION"))
+        assertTrue(prepared.messages[1].content.contains("Current Step: Implement persistence layer"))
+        assertTrue(prepared.messages[1].content.contains("Expected Action Type: AGENT_ACTION"))
+        assertTrue(prepared.messages[1].content.contains("Paused: true"))
+        assertEquals(executionTask.stateSnapshot(), prepared.diagnostic.taskState)
+        assertTrue(prepared.diagnostic.shortTerm.isEmpty())
     }
 
     private fun profile(

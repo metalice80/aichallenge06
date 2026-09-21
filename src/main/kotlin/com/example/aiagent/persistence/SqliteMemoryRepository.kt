@@ -11,6 +11,7 @@ import com.example.aiagent.memory.MemoryLayerUpdate
 import com.example.aiagent.memory.MemoryRepository
 import com.example.aiagent.profile.UserProfileSnapshot
 import com.example.aiagent.memory.MemoryUpdate
+import com.example.aiagent.task.TaskStateSnapshot
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.stereotype.Repository
 import org.springframework.transaction.annotation.Transactional
@@ -66,6 +67,7 @@ class SqliteMemoryRepository(
                 long_term_memory TEXT NOT NULL,
                 user_profile TEXT,
                 working_memory TEXT NOT NULL,
+                task_state TEXT,
                 short_term TEXT NOT NULL,
                 current_user_message TEXT NOT NULL,
                 prepared_at TEXT NOT NULL
@@ -73,6 +75,7 @@ class SqliteMemoryRepository(
             """.trimIndent(),
         )
         addColumnIfMissing("effective_context", "user_profile", "TEXT")
+        addColumnIfMissing("effective_context", "task_state", "TEXT")
     }
 
     override fun findWorking(taskId: Long): List<MemoryEntry> = jdbcTemplate.query(
@@ -146,14 +149,15 @@ class SqliteMemoryRepository(
             """
             INSERT INTO effective_context(
                 task_id, strategy, system_prompt, long_term_memory, user_profile,
-                working_memory, short_term, current_user_message, prepared_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                working_memory, task_state, short_term, current_user_message, prepared_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET
                 strategy = excluded.strategy,
                 system_prompt = excluded.system_prompt,
                 long_term_memory = excluded.long_term_memory,
                 user_profile = excluded.user_profile,
                 working_memory = excluded.working_memory,
+                task_state = excluded.task_state,
                 short_term = excluded.short_term,
                 current_user_message = excluded.current_user_message,
                 prepared_at = excluded.prepared_at
@@ -164,6 +168,7 @@ class SqliteMemoryRepository(
             jsonMapper.writeValueAsString(context.longTermMemory),
             context.userProfile?.let(jsonMapper::writeValueAsString),
             jsonMapper.writeValueAsString(context.workingMemory),
+            context.taskState?.let(jsonMapper::writeValueAsString),
             jsonMapper.writeValueAsString(context.shortTerm),
             jsonMapper.writeValueAsString(context.currentUserMessage),
             context.preparedAt.toString(),
@@ -188,6 +193,9 @@ class SqliteMemoryRepository(
                     resultSet.getString("working_memory"),
                     Array<MemoryEntry>::class.java,
                 ).toList(),
+                taskState = resultSet.getString("task_state")?.let { value ->
+                    jsonMapper.readValue(value, TaskStateSnapshot::class.java)
+                },
                 shortTerm = jsonMapper.readValue(
                     resultSet.getString("short_term"),
                     Array<ChatMessage>::class.java,

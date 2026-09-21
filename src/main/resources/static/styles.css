@@ -67,12 +67,112 @@ h2 {
 
 .task-controls {
     display: grid;
-    grid-template-columns: minmax(240px, 1fr) auto auto;
+    grid-template-columns: minmax(240px, 1fr) auto;
     gap: 12px;
     align-items: end;
     border-bottom: 1px solid var(--border);
     padding: 18px 24px;
     background: var(--surface-muted);
+}
+
+.task-state-panel {
+    display: grid;
+    gap: 16px;
+    border-bottom: 1px solid var(--border);
+    padding: 20px 24px;
+    background: var(--surface);
+}
+
+.task-state-heading,
+.task-state-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.task-state-heading h2,
+.task-state-heading .eyebrow {
+    margin-bottom: 0;
+}
+
+.task-paused-badge {
+    border-radius: 999px;
+    padding: 6px 10px;
+    background: #fff4e5;
+    color: #934b00;
+    font-size: 0.78rem;
+    font-weight: 800;
+}
+
+.task-progress {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.task-progress li {
+    position: relative;
+    border-top: 3px solid var(--border);
+    padding-top: 9px;
+    color: var(--muted);
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-align: center;
+}
+
+.task-progress li.complete {
+    border-color: #17a673;
+    color: #0f7654;
+}
+
+.task-progress li.current {
+    border-color: var(--accent);
+    color: var(--accent-dark);
+}
+
+.task-state-details {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin: 0;
+}
+
+.task-state-details div {
+    min-width: 0;
+    border-radius: 10px;
+    padding: 10px 12px;
+    background: var(--surface-muted);
+}
+
+.task-state-details dt {
+    margin-bottom: 4px;
+    color: var(--muted);
+    font-size: 0.7rem;
+    font-weight: 700;
+}
+
+.task-state-details dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+    font-size: 0.88rem;
+    font-weight: 650;
+}
+
+.task-state-actions {
+    justify-content: flex-end;
+    flex-wrap: wrap;
+}
+
+.task-state-history {
+    display: grid;
+    gap: 8px;
+}
+
+.task-state-history[hidden] {
+    display: none;
 }
 
 .profile-controls {
@@ -608,6 +708,19 @@ textarea:disabled {
     .task-controls,
     .profile-controls {
         padding: 16px;
+    }
+
+    .task-state-panel {
+        padding: 16px;
+    }
+
+    .task-state-details {
+        grid-template-columns: 1fr;
+    }
+
+    .task-state-actions {
+        align-items: stretch;
+        flex-direction: column;
     }
 
     .stats-heading {

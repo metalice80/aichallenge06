@@ -42,6 +42,7 @@ class EffectiveContextBuilder(
             if (memoryContext.working.isNotEmpty()) {
                 add(ChatMessage(Role.SYSTEM, formatWorking(task, memoryContext.working)))
             }
+            add(ChatMessage(Role.SYSTEM, formatTaskState(task)))
             addAll(contextPlan.contextMessages)
             add(currentUserMessage)
         }
@@ -54,6 +55,7 @@ class EffectiveContextBuilder(
                 longTermMemory = memoryContext.longTerm,
                 userProfile = profileSnapshot,
                 workingMemory = memoryContext.working,
+                taskState = task.stateSnapshot(),
                 shortTerm = contextPlan.contextMessages,
                 currentUserMessage = currentUserMessage,
                 preparedAt = Instant.now(),
@@ -87,6 +89,16 @@ class EffectiveContextBuilder(
         appendLine("WORKING MEMORY for Task \"${task.name}\" (overrides User Profile and Long-Term Memory):")
         entries.forEach { entry -> appendLine("- ${entry.key} = ${entry.value}") }
         append("The current user message overrides conflicting values here.")
+    }
+
+    private fun formatTaskState(task: AgentTask): String = buildString {
+        appendLine("TASK STATE")
+        appendLine("Task: ${task.name}")
+        appendLine("Stage: ${task.stage}")
+        appendLine("Current Step: ${task.currentStep}")
+        appendLine("Expected Action Type: ${task.expectedActionType}")
+        appendLine("Expected Action Description: ${task.expectedActionDescription ?: "(none)"}")
+        append("Paused: ${task.paused}")
     }
 
     private fun UserProfileSnapshot.redacted() = copy(

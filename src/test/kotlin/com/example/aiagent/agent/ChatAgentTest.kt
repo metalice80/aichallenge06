@@ -32,8 +32,12 @@ import com.example.aiagent.profile.ResponseStyle
 import com.example.aiagent.profile.UserProfile
 import com.example.aiagent.profile.UserProfileService
 import com.example.aiagent.task.AgentTask
+import com.example.aiagent.task.ExpectedActionType
 import com.example.aiagent.task.TaskRepository
 import com.example.aiagent.task.TaskService
+import com.example.aiagent.task.TaskStage
+import com.example.aiagent.task.TaskStateCoordinator
+import com.example.aiagent.task.TaskStateService
 import com.example.aiagent.task.TaskStatus
 import io.mockk.every
 import io.mockk.just
@@ -41,6 +45,7 @@ import io.mockk.mockk
 import io.mockk.runs
 import io.mockk.slot
 import io.mockk.verify
+import io.mockk.verifyOrder
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -78,8 +83,24 @@ class ChatAgentTest {
         completedAt = null,
         selected = true,
     )
+    private val taskStateMessage = ChatMessage(
+        Role.SYSTEM,
+        """
+        TASK STATE
+        Task: Main Task
+        Stage: PLANNING
+        Current Step: Define goals, requirements, and execution plan
+        Expected Action Type: USER_INPUT
+        Expected Action Description: Provide goals, requirements, and constraints
+        Paused: false
+        """.trimIndent(),
+    )
     private val taskService = mockk<TaskService> {
         every { activeTask() } returns activeTask
+    }
+    private val taskStateService = mockk<TaskStateService>(relaxed = true)
+    private val taskStateCoordinator = mockk<TaskStateCoordinator>(relaxed = true) {
+        every { analyzeBeforeMainRequest(activeTask, any()) } returns activeTask
     }
     private val memoryService = mockk<MemoryService>(relaxed = true) {
         every { context(activeTask) } returns MemoryContext(emptyList(), emptyList())
@@ -96,6 +117,8 @@ class ChatAgentTest {
         contextStateService = contextStateService,
         branchService = branchService,
         taskService = taskService,
+        taskStateService = taskStateService,
+        taskStateCoordinator = taskStateCoordinator,
         memoryService = memoryService,
         effectiveContextBuilder = effectiveContextBuilder,
         userProfileService = userProfileService,
@@ -112,6 +135,7 @@ class ChatAgentTest {
         assertEquals(
             listOf(
                 ChatMessage(Role.SYSTEM, "System instruction"),
+                taskStateMessage,
                 ChatMessage(Role.USER, "Привет"),
             ),
             request.captured.messages,
@@ -119,6 +143,32 @@ class ChatAgentTest {
         assertEquals(LlmProvider.OPENAI, result.provider)
         verify(exactly = 1) { openAiClient.chat(any()) }
         verify(exactly = 0) { openRouterClient.chat(any()) }
+    }
+
+    @Test
+    fun `analyzer updates Task before the main request context is built`() {
+        val executionTask = activeTask.copy(
+            stage = TaskStage.EXECUTION,
+            currentStep = "Implement persistence layer",
+            expectedActionType = ExpectedActionType.AGENT_ACTION,
+            expectedActionDescription = "Implement Room and Booking repositories",
+        )
+        val userMessage = ChatMessage(Role.USER, "План подтверждаю. Начинай реализацию.")
+        every { taskStateCoordinator.analyzeBeforeMainRequest(activeTask, userMessage) } returns executionTask
+        every { memoryService.context(executionTask) } returns MemoryContext(emptyList(), emptyList())
+        val request = slot<LlmRequest>()
+        every { openAiClient.chat(capture(request)) } returns response("Начинаю реализацию.")
+
+        agent.sendMessage(agentRequest(userMessage.content))
+
+        val taskStateContext = request.captured.messages.single { it.content.startsWith("TASK STATE") }
+        assertTrue(taskStateContext.content.contains("Stage: EXECUTION"))
+        assertTrue(taskStateContext.content.contains("Current Step: Implement persistence layer"))
+        assertTrue(taskStateContext.content.contains("Expected Action Type: AGENT_ACTION"))
+        verifyOrder {
+            taskStateCoordinator.analyzeBeforeMainRequest(activeTask, userMessage)
+            openAiClient.chat(any())
+        }
     }
 
     @Test
@@ -192,6 +242,7 @@ class ChatAgentTest {
         assertEquals(
             listOf(
                 ChatMessage(Role.SYSTEM, "System instruction"),
+                taskStateMessage,
                 ChatMessage(Role.USER, "Что такое JVM?"),
                 ChatMessage(Role.ASSISTANT, "JVM — это виртуальная машина Java."),
                 ChatMessage(Role.USER, "А зачем она нужна?"),
@@ -289,6 +340,8 @@ class ChatAgentTest {
             contextStateService = contextStateService,
             branchService = branchService,
             taskService = taskService,
+            taskStateService = taskStateService,
+            taskStateCoordinator = taskStateCoordinator,
             memoryService = memoryService,
             effectiveContextBuilder = effectiveContextBuilder,
             userProfileService = userProfileService,
@@ -307,6 +360,7 @@ class ChatAgentTest {
         assertEquals(
             listOf(
                 ChatMessage(Role.SYSTEM, "System instruction"),
+                taskStateMessage,
                 ChatMessage(Role.USER, "Меня зовут Алексей"),
                 ChatMessage(Role.ASSISTANT, "Приятно познакомиться, Алексей"),
                 ChatMessage(Role.USER, "Как меня зовут?"),
@@ -359,6 +413,8 @@ class ChatAgentTest {
             contextStateService = contextStateService,
             branchService = branchService,
             taskService = taskService,
+            taskStateService = taskStateService,
+            taskStateCoordinator = taskStateCoordinator,
             memoryService = memoryService,
             effectiveContextBuilder = effectiveContextBuilder,
             userProfileService = userProfileService,
@@ -378,6 +434,7 @@ class ChatAgentTest {
         assertEquals(
             listOf(
                 ChatMessage(Role.SYSTEM, "System instruction"),
+                taskStateMessage,
                 ChatMessage(Role.SYSTEM, "Persistent fact: language=Kotlin"),
                 ChatMessage(Role.ASSISTANT, "Recent answer"),
                 ChatMessage(Role.USER, "New question"),
@@ -418,6 +475,8 @@ class ChatAgentTest {
             contextStateService = contextStateService,
             branchService = branchService,
             taskService = taskService,
+            taskStateService = taskStateService,
+            taskStateCoordinator = taskStateCoordinator,
             memoryService = memoryService,
             effectiveContextBuilder = effectiveContextBuilder,
             userProfileService = userProfileService,
@@ -439,6 +498,7 @@ class ChatAgentTest {
         assertEquals(
             listOf(
                 ChatMessage(Role.SYSTEM, "System instruction"),
+                taskStateMessage,
                 ChatMessage(Role.USER, "First question"),
                 ChatMessage(Role.ASSISTANT, "First answer"),
                 ChatMessage(Role.USER, "Second question"),
@@ -505,6 +565,8 @@ class ChatAgentTest {
             contextStateService = contextStateService,
             branchService = branchService,
             taskService = taskService,
+            taskStateService = taskStateService,
+            taskStateCoordinator = taskStateCoordinator,
             memoryService = memoryService,
             effectiveContextBuilder = effectiveContextBuilder,
             userProfileService = userProfileService,

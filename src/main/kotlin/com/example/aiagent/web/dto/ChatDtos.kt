@@ -17,7 +17,14 @@ import com.example.aiagent.memory.MemoryChange
 import com.example.aiagent.memory.MemoryEntry
 import com.example.aiagent.memory.MemoryInspector
 import com.example.aiagent.task.AgentTask
+import com.example.aiagent.task.ExpectedActionType
+import com.example.aiagent.task.TaskEvent
+import com.example.aiagent.task.TaskProgressProposal
 import com.example.aiagent.task.TaskService
+import com.example.aiagent.task.TaskStage
+import com.example.aiagent.task.TaskStateHistoryEntry
+import com.example.aiagent.task.TaskStateService
+import com.example.aiagent.task.TaskStateSnapshot
 import com.example.aiagent.task.TaskStatus
 import jakarta.validation.constraints.NotBlank
 import jakarta.validation.constraints.Size
@@ -47,6 +54,30 @@ data class CreateTaskRequest(
         message = "Название задачи не должно превышать ${TaskService.MAX_NAME_LENGTH} символов.",
     )
     val name: String,
+)
+
+data class TaskEventRequest(
+    val event: TaskEvent,
+    @field:Size(max = TaskStateService.MAX_CURRENT_STEP_LENGTH)
+    val currentStep: String? = null,
+    val expectedActionType: ExpectedActionType? = null,
+    @field:Size(max = TaskStateService.MAX_EXPECTED_ACTION_DESCRIPTION_LENGTH)
+    val expectedActionDescription: String? = null,
+) {
+    fun proposal() = TaskProgressProposal(
+        currentStep = currentStep,
+        expectedActionType = expectedActionType,
+        expectedActionDescription = expectedActionDescription,
+    )
+}
+
+data class UpdateTaskProgressRequest(
+    @field:NotBlank(message = "Current step must not be blank.")
+    @field:Size(max = TaskStateService.MAX_CURRENT_STEP_LENGTH)
+    val currentStep: String,
+    val expectedActionType: ExpectedActionType,
+    @field:Size(max = TaskStateService.MAX_EXPECTED_ACTION_DESCRIPTION_LENGTH)
+    val expectedActionDescription: String? = null,
 )
 
 data class TokenUsageResponse(
@@ -173,6 +204,11 @@ data class TaskResponse(
     val createdAt: Instant,
     val completedAt: Instant?,
     val selected: Boolean,
+    val stage: TaskStage,
+    val currentStep: String,
+    val expectedActionType: ExpectedActionType,
+    val expectedActionDescription: String?,
+    val paused: Boolean,
 ) {
     companion object {
         fun from(task: AgentTask) = TaskResponse(
@@ -182,6 +218,59 @@ data class TaskResponse(
             createdAt = task.createdAt,
             completedAt = task.completedAt,
             selected = task.selected,
+            stage = task.stage,
+            currentStep = task.currentStep,
+            expectedActionType = task.expectedActionType,
+            expectedActionDescription = task.expectedActionDescription,
+            paused = task.paused,
+        )
+    }
+}
+
+data class TaskStateSnapshotResponse(
+    val taskId: Long,
+    val taskName: String,
+    val stage: TaskStage,
+    val currentStep: String,
+    val expectedActionType: ExpectedActionType,
+    val expectedActionDescription: String?,
+    val paused: Boolean,
+) {
+    companion object {
+        fun from(state: TaskStateSnapshot) = TaskStateSnapshotResponse(
+            taskId = state.taskId,
+            taskName = state.taskName,
+            stage = state.stage,
+            currentStep = state.currentStep,
+            expectedActionType = state.expectedActionType,
+            expectedActionDescription = state.expectedActionDescription,
+            paused = state.paused,
+        )
+    }
+}
+
+data class TaskStateHistoryResponse(
+    val id: Long,
+    val taskId: Long,
+    val event: String,
+    val fromStage: TaskStage?,
+    val toStage: TaskStage,
+    val paused: Boolean,
+    val currentStep: String,
+    val description: String?,
+    val createdAt: Instant,
+) {
+    companion object {
+        fun from(entry: TaskStateHistoryEntry) = TaskStateHistoryResponse(
+            id = entry.id,
+            taskId = entry.taskId,
+            event = entry.event.name,
+            fromStage = entry.fromStage,
+            toStage = entry.toStage,
+            paused = entry.paused,
+            currentStep = entry.currentStep,
+            description = entry.description,
+            createdAt = entry.createdAt,
         )
     }
 }
@@ -235,6 +324,7 @@ data class EffectiveContextResponse(
     val longTermMemory: List<MemoryEntryResponse>,
     val userProfile: UserProfileResponse?,
     val workingMemory: List<MemoryEntryResponse>,
+    val taskState: TaskStateSnapshotResponse?,
     val shortTerm: List<ChatHistoryResponse>,
     val currentUserMessage: ChatHistoryResponse,
     val preparedAt: Instant,
@@ -246,6 +336,7 @@ data class EffectiveContextResponse(
             longTermMemory = context.longTermMemory.map(MemoryEntryResponse::from),
             userProfile = context.userProfile?.let(UserProfileResponse::from),
             workingMemory = context.workingMemory.map(MemoryEntryResponse::from),
+            taskState = context.taskState?.let(TaskStateSnapshotResponse::from),
             shortTerm = context.shortTerm.map(ChatHistoryResponse::from),
             currentUserMessage = ChatHistoryResponse.from(context.currentUserMessage),
             preparedAt = context.preparedAt,

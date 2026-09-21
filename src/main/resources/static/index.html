@@ -28,10 +28,52 @@
             <button id="create-task-button" class="button button-secondary" type="button">
                 + Новая задача
             </button>
-            <button id="complete-task-button" class="button button-secondary" type="button">
-                Завершить задачу
-            </button>
         </div>
+        <section class="task-state-panel" aria-labelledby="task-state-title">
+            <div class="task-state-heading">
+                <div>
+                    <p class="eyebrow">Formal process state</p>
+                    <h2 id="task-state-title">Task State</h2>
+                </div>
+                <span id="task-paused-badge" class="task-paused-badge" hidden>Paused</span>
+            </div>
+            <ol id="task-progress" class="task-progress" aria-label="Task progress">
+                <li data-task-stage="PLANNING">Planning</li>
+                <li data-task-stage="EXECUTION">Execution</li>
+                <li data-task-stage="VALIDATION">Validation</li>
+                <li data-task-stage="DONE">Done</li>
+            </ol>
+            <dl class="task-state-details">
+                <div><dt>Stage</dt><dd id="task-stage">—</dd></div>
+                <div><dt>Current Step</dt><dd id="task-current-step">—</dd></div>
+                <div><dt>Expected Action</dt><dd id="task-expected-action">—</dd></div>
+                <div><dt>Description</dt><dd id="task-expected-description">—</dd></div>
+            </dl>
+            <div class="task-state-actions">
+                <button id="approve-plan-button" class="button button-primary" type="button" hidden>
+                    Подтвердить план
+                </button>
+                <button id="complete-execution-button" class="button button-primary" type="button" hidden>
+                    Завершить реализацию
+                </button>
+                <button id="validation-passed-button" class="button button-primary" type="button" hidden>
+                    Проверка успешна
+                </button>
+                <button id="validation-failed-button" class="button button-secondary" type="button" hidden>
+                    Проверка не пройдена
+                </button>
+                <button id="pause-task-button" class="button button-secondary" type="button" hidden>
+                    Pause
+                </button>
+                <button id="resume-task-button" class="button button-primary" type="button" hidden>
+                    Resume
+                </button>
+                <button id="task-history-button" class="button button-secondary" type="button">
+                    State History
+                </button>
+            </div>
+            <div id="task-state-history" class="task-state-history" hidden></div>
+        </section>
         <div class="profile-controls" aria-label="Активный профиль">
             <label class="provider-field profile-selector" for="profile-select">
                 <span>Profile</span>

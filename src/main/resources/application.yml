@@ -18,6 +18,19 @@ llm:
     Отвечай понятно, точно и по существу.
     Учитывай предыдущие сообщения пользователя в текущем диалоге.
 
+task:
+  state:
+    analyzer:
+      enabled: ${TASK_STATE_ANALYZER_ENABLED:true}
+      provider: ${TASK_STATE_ANALYZER_PROVIDER:OPENAI}
+      model: ${TASK_STATE_ANALYZER_MODEL:gpt-4o-mini}
+      system-prompt: |-
+        Analyze the active Task State and the new user message before the main assistant response.
+        Return a structured proposal only.
+        Explicit approval of a plan must propose PLAN_APPROVED while PLANNING.
+        Concrete work requests may update currentStep and expectedAction without changing stage.
+        Never invent completion and never propose an event invalid for the current stage.
+
 context:
   strategies:
     sliding-window:

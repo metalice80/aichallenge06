@@ -1,0 +1,88 @@
+package com.example.aiagent.task
+
+import com.example.aiagent.agent.ChatMessage
+import com.example.aiagent.agent.Role
+import com.example.aiagent.config.TaskProgressAnalyzerProperties
+import com.example.aiagent.config.TaskStateProperties
+import com.example.aiagent.llm.LlmClient
+import com.example.aiagent.llm.LlmClientResolver
+import com.example.aiagent.llm.LlmProvider
+import com.example.aiagent.llm.LlmRequest
+import com.example.aiagent.llm.LlmResponse
+import com.example.aiagent.llm.StructuredOutputParser
+import com.example.aiagent.llm.TokenUsage
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.slot
+import io.mockk.verify
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Test
+import tools.jackson.module.kotlin.jacksonObjectMapper
+import java.time.Instant
+
+class LlmTaskProgressAnalyzerTest {
+    @Test
+    fun `analyzer uses its configured provider model and isolated prompt`() {
+        val client = mockk<LlmClient>()
+        val resolver = mockk<LlmClientResolver> {
+            every { resolve(LlmProvider.OPENROUTER) } returns client
+        }
+        val request = slot<LlmRequest>()
+        every { client.chat(capture(request)) } returns LlmResponse(
+            content = """
+                {
+                  "currentStep":"Implement repository adapter",
+                  "expectedActionType":"AGENT_ACTION",
+                  "expectedActionDescription":"Write SQLite repository code",
+                  "proposedEvent":null
+                }
+            """.trimIndent(),
+            model = "openai/analyzer-model",
+            usage = TokenUsage(3, 2, 5),
+        )
+        val analyzer = LlmTaskProgressAnalyzer(
+            resolver,
+            TaskStateProperties(
+                TaskProgressAnalyzerProperties(
+                    enabled = true,
+                    provider = LlmProvider.OPENROUTER,
+                    model = "openai/analyzer-model",
+                    systemPrompt = "Return deterministic task progress JSON",
+                ),
+            ),
+            StructuredOutputParser(jacksonObjectMapper()),
+        )
+        val task = AgentTask(
+            id = 1,
+            name = "Booking",
+            status = TaskStatus.ACTIVE,
+            createdAt = Instant.parse("2026-01-01T00:00:00Z"),
+            completedAt = null,
+            selected = true,
+            stage = TaskStage.EXECUTION,
+            currentStep = "Implement persistence layer",
+            expectedActionType = ExpectedActionType.AGENT_ACTION,
+            expectedActionDescription = "Propose repository implementation",
+        )
+
+        val proposal = analyzer.analyze(
+            task,
+            ChatMessage(Role.USER, "Continue"),
+        )
+
+        assertEquals("openai/analyzer-model", request.captured.model)
+        assertEquals(
+            ChatMessage(Role.SYSTEM, "Return deterministic task progress JSON"),
+            request.captured.messages.first(),
+        )
+        assertEquals(2, request.captured.messages.size)
+        assertFalse(request.captured.messages.any { it.content.contains("USER PROFILE") })
+        assertEquals(true, request.captured.messages.last().content.contains("Allowed transitions:"))
+        assertEquals(true, request.captured.messages.last().content.contains("New user message:\nContinue"))
+        assertEquals("Implement repository adapter", proposal.currentStep)
+        assertEquals(ExpectedActionType.AGENT_ACTION, proposal.expectedActionType)
+        assertEquals("Write SQLite repository code", proposal.expectedActionDescription)
+        verify(exactly = 1) { resolver.resolve(LlmProvider.OPENROUTER) }
+    }
+}

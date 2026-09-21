@@ -24,19 +24,23 @@ Browser ─► ChatController/UserProfileController ─► ChatAgent ─► LlmC
                                                        │     ├─► UserProfileService ─► UserProfileRepository
                                                        │     ├─► MemoryService ─► MemoryRepository
                                                        │     └─► ContextStrategyResolver
-                                                       ├─► TaskService ─► TaskRepository
+                                                       ├─► TaskService / TaskStateService
+                                                       │     ├─► TaskStateMachine
+                                                       │     └─► TaskRepository ─► SQLite
+                                                       ├─► TaskProgressAnalyzer ─► LlmClientResolver
                                                        ├─► MemoryExtractor ─► LlmClientResolver
                                                        └─► repositories ─► SQLite
 ```
 
 - `ChatController` отвечает за REST-контракт, validation и вызов provider-neutral `Agent`.
 - `ChatAgent` не знает URL, API keys или HTTP headers providers. Для каждого запроса он независимо выбирает `LlmClient` и `ContextStrategy`.
-- Persistent `Task` определяет текущие `Conversation`, branch graph, token usage, Sticky Facts и Working Memory. Persistent `UserProfile` — независимое глобальное измерение: переключение Profile не меняет Task или memory.
-- `EffectiveContextBuilder` — единственный pipeline основного LLM context. Он объединяет system prompt, Long-Term, explicit User Profile, Working, effective Short-Term и current message.
-- Конфликты разрешаются как `current USER > Working/Task > User Profile > Long-Term > application defaults`.
-- `MemoryExtractor`, Facts Extractor и Rolling Summary используют собственные prompts и не получают User Profile.
+- Persistent `Task` определяет текущие `Conversation`, branch graph, token usage, Sticky Facts, Working Memory и независимый FSM state. Persistent `UserProfile` — независимое глобальное измерение: переключение Profile не меняет Task или memory.
+- `TaskStateMachine` содержит только детерминированную transition table. `TaskStateService` валидирует события, pause/resume и атомарно сохраняет Task вместе с state history.
+- `EffectiveContextBuilder` — единственный pipeline основного LLM context. Он объединяет system prompt, Long-Term, explicit User Profile, Working, Task State, effective Short-Term и current message.
+- Конфликты разрешаются как `current USER > Task State/Working > User Profile > Long-Term > application defaults`.
+- `MemoryExtractor`, Facts Extractor, Rolling Summary и `TaskProgressAnalyzer` используют собственные prompts и не получают User Profile. Перед основным LLM request analyzer возвращает proposal; persistent FSM может изменить только `TaskStateService`.
 - `SqliteConversationRepository` атомарно сохраняет завершённые пары `USER + ASSISTANT` и provider-reported usage в scope активной Task; profile tokens вручную не прибавляются.
-- Ошибка Memory Extractor не отменяет успешный основной ответ и не изменяет существующую memory. При ошибке сохранения Conversation in-memory messages и накопленная статистика откатываются.
+- Ошибка Memory Extractor или Task Progress Analyzer не отменяет успешный основной ответ и не изменяет существующее состояние. При ошибке сохранения Conversation in-memory messages и накопленная статистика откатываются.
 
 ## Настройка
 
@@ -162,9 +166,37 @@ Profile применяется только к основным пользова
 
 UI содержит selector, создание и редактирование Profile. API keys и похожие секреты отклоняются validation и дополнительно маскируются перед LLM request/diagnostic persistence.
 
+### Task State Machine
+
+Каждая Task хранит `stage`, конкретный `currentStep`, тип и описание `expectedAction`, а также ортогональный флаг `paused`. Разрешены только переходы:
+
+| Current stage | Event | Next stage |
+|---|---|---|
+| `PLANNING` | `PLAN_APPROVED` | `EXECUTION` |
+| `EXECUTION` | `EXECUTION_COMPLETED` | `VALIDATION` |
+| `VALIDATION` | `VALIDATION_PASSED` | `DONE` |
+| `VALIDATION` | `VALIDATION_FAILED` | `EXECUTION` |
+
+Любая другая пара stage/event возвращает `400 Bad Request` и не изменяет Task или history. `PAUSE` и `RESUME` не являются stages: они меняют только `paused`; pause для `DONE` запрещён. `DONE` всегда синхронизирован с `TaskStatus.COMPLETED` и `ExpectedActionType.NONE`.
+
+UI показывает stage, current step, expected action, progress indicator, stage-specific event controls, Pause/Resume и persistent State History. В `PLANNING` доступно подтверждение плана, в `EXECUTION` — завершение реализации, в `VALIDATION` — успешный/неуспешный результат проверки; для `DONE` state controls скрыты. Task State добавляется отдельным system block в каждый основной LLM request вне Sliding Window, поэтому короткое сообщение `Продолжай.` сохраняет смысл после reset, pause/restart или выпадения исходного обсуждения из Short-Term.
+
+Progress analyzer включён по умолчанию и настраивается независимо от основной chat model:
+
+```yaml
+task:
+  state:
+    analyzer:
+      enabled: true
+      provider: OPENAI
+      model: gpt-4o-mini
+```
+
+Для каждого сообщения активной незавершённой и неприостановленной Task analyzer получает текущий Task State и новое user message **до** основного LLM request. Proposal передаётся в `TaskStateService`: event валидируется тем же `TaskStateMachine`, который обслуживает ручной `POST /events`, затем state и history атомарно сохраняются в SQLite. Analyzer не использует User Profile и не пишет в SQLite напрямую.
+
 ### Memory Layers и Tasks
 
-UI позволяет создать, выбрать и завершить Task. Завершённая Task остаётся в SQLite вместе с Conversation, Working Memory и branches, но становится read-only.
+UI позволяет создать и выбрать Task. Завершение возможно только валидным событием `VALIDATION_PASSED`; завершённая Task остаётся в SQLite вместе с Conversation, Working Memory, branches и State History, но становится read-only.
 
 - `SHORT_TERM` — существующая `Conversation` активной Task; selected Context Strategy определяет только её effective часть.
 - `WORKING` — task-scoped key-value state: цель, ограничения, технологии и решения текущей Task.
@@ -205,7 +237,8 @@ Upsert заменяет значение по стабильному key; delete
 
 SQLite schema содержит:
 
-- `agent_task`, `active_task_state` — Task lifecycle и выбранная Task;
+- `agent_task`, `active_task_state` — Task lifecycle, formal FSM state и выбранная Task;
+- `task_state_history` — task-scoped transitions, progress updates, Pause и Resume;
 - `user_profile`, `active_profile_state` — Profile settings и глобально выбранный Profile;
 - `chat_message`, `llm_request_usage` — task-scoped Conversation и token usage;
 - `task_conversation_summary` — task-scoped Rolling Summary state;
@@ -214,7 +247,7 @@ SQLite schema содержит:
 - `working_memory` — key-value entries с составным ключом `(task_id, key)`;
 - `long_term_memory` — глобальные key-value entries;
 - `last_memory_update` — последняя классификация сообщения по Task;
-- `effective_context` — sanitized logical snapshot последнего main request по Task, включая фактически использованный User Profile.
+- `effective_context` — sanitized logical snapshot последнего main request по Task, включая фактически использованные User Profile и Task State.
 
 Legacy `conversation_summary` и `conversation_fact` сохраняются только для безопасной migration существующей базы. При первом запуске их данные копируются в task-scoped таблицы default Task. Если legacy summary cursor превышает число мигрированных сообщений, повреждённый summary удаляется, а Conversation и usage сохраняются.
 
@@ -224,8 +257,8 @@ System prompt в базу Conversation не записывается и доба
 
 1. создать две Tasks и выполнить несколько успешных обменов;
 2. остановить и снова запустить приложение с тем же `AGENT_DB_PATH`;
-3. открыть UI — выбранная Task, её Conversation, Working Memory, branches и token usage восстановятся;
-4. переключить Task — Long-Term останется общей, а Conversation и Working Memory сменятся.
+3. открыть UI — выбранная Task, её Conversation, Working Memory, branches, token usage и FSM state восстановятся;
+4. переключить Task — Long-Term останется общей, а Conversation, Working Memory и Task State сменятся;
 5. active Profile и все его settings также восстановятся независимо от выбранной Task.
 
 Для отдельной базы:
@@ -234,7 +267,7 @@ System prompt в базу Conversation не записывается и доба
 export AGENT_DB_PATH="./data/local-agent.db"
 ```
 
-`Сбросить чат` очищает только Short-Term state активной Task: messages, usage, rolling summary, Sticky Facts и её branch graph. Working и Long-Term не удаляются. Для них в UI есть отдельные действия; очистка Long-Term требует confirmation.
+`Сбросить чат` очищает только Short-Term state активной Task: messages, usage, rolling summary, Sticky Facts и её branch graph. Working, Long-Term и Task FSM state не удаляются. Для memory layers в UI есть отдельные действия; очистка Working также не меняет FSM, а очистка Long-Term требует confirmation.
 
 ## Запуск
 
@@ -274,6 +307,11 @@ Create/update принимают `name`, `responseLanguage`, `expertiseLevel`, `
 GET  /api/chat/tasks
 POST /api/chat/tasks
 POST /api/chat/tasks/{taskId}/activate
+POST /api/chat/tasks/{taskId}/events
+POST /api/chat/tasks/{taskId}/progress
+POST /api/chat/tasks/{taskId}/pause
+POST /api/chat/tasks/{taskId}/resume
+GET  /api/chat/tasks/{taskId}/history
 POST /api/chat/tasks/{taskId}/complete
 
 GET  /api/chat/memory?contextStrategy=SLIDING_WINDOW
@@ -281,7 +319,7 @@ POST /api/chat/memory/working/clear
 POST /api/chat/memory/long-term/clear
 ```
 
-`GET /memory` возвращает три слоя, Last Memory Update и sanitized Effective Context. Working clear действует только на выбранную Task; Long-Term clear глобален.
+`events` принимает `event` и optional progress proposal; stage-specific UI controls отправляют именно события (`PLAN_APPROVED`, `EXECUTION_COMPLETED`, `VALIDATION_PASSED`, `VALIDATION_FAILED`), а не целевой stage. `progress` обновляет только `currentStep`/`expectedAction`. Endpoint `complete` применяет `VALIDATION_PASSED` через тот же `TaskStateService` и поэтому отклоняется вне `VALIDATION`. `GET /memory` возвращает три слоя, Last Memory Update и sanitized Effective Context с отдельным Task State block. Working clear действует только на выбранную Task; Long-Term clear глобален.
 
 ### Context strategies и branches
 
@@ -350,7 +388,7 @@ OpenRouter использует тот же контракт с provider `OPENRO
 POST /api/chat/reset
 ```
 
-Ответ: `204 No Content`. Reset очищает Short-Term state только выбранной Task и не затрагивает Working/Long-Term или другие Tasks.
+Ответ: `204 No Content`. Reset очищает Short-Term state только выбранной Task и не затрагивает Working/Long-Term, Task FSM state или другие Tasks.
 
 ## Ошибки
 
@@ -369,4 +407,4 @@ API возвращает JSON вида:
 ./gradlew build
 ```
 
-Unit tests проверяют providers/plugins, provider token usage, Context Strategies, оба internal extractor, Profile validation, три варианта personalization и semantic priority. SQLite integration tests проверяют Task/Profile switch, Profile edit/restart, Working isolation, global Long-Term, independent reset и schema migration `effective_context.user_profile`.
+Unit tests проверяют providers/plugins, provider token usage, Context Strategies, internal extractors/analyzer, pre-main analyzer ordering, Profile validation, FSM transition table, invalid events, Pause/Resume, Effective Context и semantic priority. SQLite integration tests проверяют общий `TaskStateMachine` для chat proposals и ручных events, полный FSM path, Task/Profile switch, Task state isolation/history/restart/atomicity, Profile edit/restart, Working isolation, global Long-Term, independent reset и schema migrations.

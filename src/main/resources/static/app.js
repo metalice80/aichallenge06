@@ -7,7 +7,20 @@ const modelInput = document.querySelector('#model-input');
 const contextStrategySelect = document.querySelector('#context-strategy-select');
 const taskSelect = document.querySelector('#task-select');
 const createTaskButton = document.querySelector('#create-task-button');
-const completeTaskButton = document.querySelector('#complete-task-button');
+const approvePlanButton = document.querySelector('#approve-plan-button');
+const completeExecutionButton = document.querySelector('#complete-execution-button');
+const validationPassedButton = document.querySelector('#validation-passed-button');
+const validationFailedButton = document.querySelector('#validation-failed-button');
+const pauseTaskButton = document.querySelector('#pause-task-button');
+const resumeTaskButton = document.querySelector('#resume-task-button');
+const taskHistoryButton = document.querySelector('#task-history-button');
+const taskStateHistory = document.querySelector('#task-state-history');
+const taskStage = document.querySelector('#task-stage');
+const taskCurrentStep = document.querySelector('#task-current-step');
+const taskExpectedAction = document.querySelector('#task-expected-action');
+const taskExpectedDescription = document.querySelector('#task-expected-description');
+const taskPausedBadge = document.querySelector('#task-paused-badge');
+const taskProgress = document.querySelector('#task-progress');
 const profileSelect = document.querySelector('#profile-select');
 const createProfileButton = document.querySelector('#create-profile-button');
 const editProfileButton = document.querySelector('#edit-profile-button');
@@ -39,13 +52,13 @@ const lastMemoryUpdate = document.querySelector('#last-memory-update');
 const effectiveContext = document.querySelector('#effective-context');
 
 let busy = false;
-let activeTaskStatus = 'ACTIVE';
+let activeTask = null;
 let profiles = [];
 let editingProfileId = null;
 
 chatForm.addEventListener('submit', async (event) => {
     event.preventDefault();
-    if (busy || activeTaskStatus === 'COMPLETED') return;
+    if (busy || activeTask?.status === 'COMPLETED' || activeTask?.paused === true) return;
 
     const message = messageInput.value.trim();
     if (!message) {
@@ -94,6 +107,7 @@ chatForm.addEventListener('submit', async (event) => {
         appendMessage('agent', 'Агент', payload.content);
         updateStats(payload);
         await loadMemory();
+        await refreshTaskState();
     } catch (error) {
         userElement.remove();
         restoreEmptyStateIfNeeded();
@@ -161,19 +175,42 @@ createTaskButton.addEventListener('click', async () => {
     }, 'Не удалось создать задачу.');
 });
 
-completeTaskButton.addEventListener('click', async () => {
-    if (busy || !taskSelect.value || activeTaskStatus === 'COMPLETED') return;
-    if (!window.confirm('Завершить активную задачу? История и память сохранятся.')) return;
+approvePlanButton.addEventListener('click', async () => {
+    await applyTaskEvent('PLAN_APPROVED');
+});
+
+completeExecutionButton.addEventListener('click', async () => {
+    await applyTaskEvent('EXECUTION_COMPLETED');
+});
+
+validationPassedButton.addEventListener('click', async () => {
+    await applyTaskEvent('VALIDATION_PASSED');
+});
+
+validationFailedButton.addEventListener('click', async () => {
+    await applyTaskEvent('VALIDATION_FAILED');
+});
+
+pauseTaskButton.addEventListener('click', async () => {
+    if (busy || !activeTask || activeTask.paused || activeTask.stage === 'DONE') return;
+    await changeTaskPauseState('pause');
+});
+
+resumeTaskButton.addEventListener('click', async () => {
+    if (busy || !activeTask || !activeTask.paused) return;
+    await changeTaskPauseState('resume');
+});
+
+taskHistoryButton.addEventListener('click', async () => {
+    if (!activeTask) return;
+    if (!taskStateHistory.hidden) {
+        taskStateHistory.hidden = true;
+        return;
+    }
     await runAction(async () => {
-        const response = await fetch(`/api/chat/tasks/${encodeURIComponent(taskSelect.value)}/complete`, {
-            method: 'POST',
-        });
-        const payload = await readJson(response);
-        if (!response.ok) {
-            throw new Error(payload?.message || 'Не удалось завершить задачу.');
-        }
-        await loadTasks();
-    }, 'Не удалось завершить задачу.');
+        await loadTaskStateHistory();
+        taskStateHistory.hidden = false;
+    }, 'Не удалось загрузить историю состояния Task.');
 });
 
 taskSelect.addEventListener('change', async () => {
@@ -408,15 +445,15 @@ async function loadTasks() {
         option.value = String(task.id);
         option.textContent = task.status === 'COMPLETED' ? `${task.name} (завершена)` : task.name;
         option.dataset.selected = String(task.selected === true);
-        option.dataset.status = task.status;
         taskSelect.append(option);
     });
-    const selected = Array.from(taskSelect.options).find((option) => option.dataset.selected === 'true');
-    if (!selected) {
+    activeTask = payload.find((task) => task?.selected === true) || null;
+    if (!activeTask) {
         throw new Error('Сервер не выбрал активную Task.');
     }
-    taskSelect.value = selected.value;
-    activeTaskStatus = selected.dataset.status || 'ACTIVE';
+    taskSelect.value = String(activeTask.id);
+    taskStateHistory.hidden = true;
+    renderTaskState(activeTask);
     updateTaskControls();
 }
 
@@ -507,13 +544,111 @@ function updateBranchControls() {
 }
 
 function updateTaskControls() {
-    const completed = activeTaskStatus === 'COMPLETED';
-    completeTaskButton.disabled = busy || completed;
+    const completed = activeTask?.status === 'COMPLETED' || activeTask?.stage === 'DONE';
+    const paused = activeTask?.paused === true;
+    const transitionsEnabled = !busy && !completed && !paused && Boolean(activeTask);
+    const planning = transitionsEnabled && activeTask.stage === 'PLANNING';
+    const execution = transitionsEnabled && activeTask.stage === 'EXECUTION';
+    const validation = transitionsEnabled && activeTask.stage === 'VALIDATION';
+    approvePlanButton.hidden = !planning;
+    approvePlanButton.disabled = !planning;
+    completeExecutionButton.hidden = !execution;
+    completeExecutionButton.disabled = !execution;
+    validationPassedButton.hidden = !validation;
+    validationPassedButton.disabled = !validation;
+    validationFailedButton.hidden = !validation;
+    validationFailedButton.disabled = !validation;
+    pauseTaskButton.hidden = completed || paused || !activeTask;
+    pauseTaskButton.disabled = busy || completed || paused;
+    resumeTaskButton.hidden = !paused || completed;
+    resumeTaskButton.disabled = busy || !paused || completed;
+    taskHistoryButton.disabled = busy || !activeTask;
     messageInput.placeholder = completed
         ? 'Завершённая задача доступна только для просмотра'
-        : 'Введите сообщение...';
-    messageInput.disabled = busy || completed;
-    sendButton.disabled = busy || completed;
+        : paused ? 'Task paused — resume to continue' : 'Введите сообщение...';
+    messageInput.disabled = busy || completed || paused;
+    sendButton.disabled = busy || completed || paused;
+}
+
+function renderTaskState(task) {
+    taskStage.textContent = task?.stage || '—';
+    taskCurrentStep.textContent = task?.currentStep || '—';
+    taskExpectedAction.textContent = task?.expectedActionType || '—';
+    taskExpectedDescription.textContent = task?.expectedActionDescription || '—';
+    taskPausedBadge.hidden = task?.paused !== true;
+    const stages = ['PLANNING', 'EXECUTION', 'VALIDATION', 'DONE'];
+    const currentIndex = stages.indexOf(task?.stage);
+    taskProgress.querySelectorAll('[data-task-stage]').forEach((item) => {
+        const index = stages.indexOf(item.dataset.taskStage);
+        item.classList.toggle('current', index === currentIndex);
+        item.classList.toggle('complete', index < currentIndex || task?.stage === 'DONE');
+    });
+}
+
+async function applyTaskEvent(event) {
+    if (busy || !activeTask || activeTask.paused || activeTask.stage === 'DONE') return;
+    await runAction(async () => {
+        const response = await fetch(
+            `/api/chat/tasks/${encodeURIComponent(activeTask.id)}/events`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ event }),
+            },
+        );
+        const payload = await readJson(response);
+        if (!response.ok) {
+            throw new Error(payload?.message || `Не удалось применить событие ${event}.`);
+        }
+        await refreshTaskState();
+        await loadMemory();
+    }, `Не удалось применить событие ${event}.`);
+}
+
+async function changeTaskPauseState(action) {
+    await runAction(async () => {
+        const response = await fetch(
+            `/api/chat/tasks/${encodeURIComponent(activeTask.id)}/${action}`,
+            { method: 'POST' },
+        );
+        const payload = await readJson(response);
+        if (!response.ok) {
+            throw new Error(payload?.message || `Не удалось выполнить ${action}.`);
+        }
+        await refreshTaskState();
+        await loadMemory();
+    }, `Не удалось выполнить ${action}.`);
+}
+
+async function loadTaskStateHistory() {
+    const response = await fetch(
+        `/api/chat/tasks/${encodeURIComponent(activeTask.id)}/history`,
+    );
+    const payload = await readJson(response);
+    if (!response.ok || !Array.isArray(payload)) {
+        throw new Error(payload?.message || 'Не удалось загрузить историю состояния Task.');
+    }
+    taskStateHistory.replaceChildren();
+    if (!payload.length) {
+        taskStateHistory.append(diagnosticEmpty('История пуста.'));
+        return;
+    }
+    payload.forEach((entry) => {
+        const transition = entry.fromStage
+            ? `${entry.fromStage} → ${entry.toStage}`
+            : entry.toStage;
+        const detail = `${transition} · ${entry.currentStep}${entry.paused ? ' · paused' : ''}`;
+        taskStateHistory.append(diagnosticRow(entry.event || '—', detail));
+    });
+}
+
+async function refreshTaskState() {
+    const restoreHistory = !taskStateHistory.hidden;
+    await loadTasks();
+    if (restoreHistory) {
+        await loadTaskStateHistory();
+        taskStateHistory.hidden = false;
+    }
 }
 
 async function loadState() {
@@ -629,6 +764,8 @@ function renderEffectiveContext(context) {
     appendContextProfile(effectiveContext, context.userProfile);
     effectiveContext.append(diagnosticSection('WORKING MEMORY'));
     appendContextEntries(effectiveContext, context.workingMemory);
+    effectiveContext.append(diagnosticSection('TASK STATE'));
+    appendContextTaskState(effectiveContext, context.taskState);
     effectiveContext.append(diagnosticSection(`EFFECTIVE SHORT-TERM · ${context.strategy}`));
     const shortTerm = Array.isArray(context.shortTerm) ? context.shortTerm : [];
     if (!shortTerm.length) effectiveContext.append(diagnosticEmpty('(empty)'));
@@ -652,6 +789,21 @@ function appendContextProfile(container, profile) {
     if (profile.customInstructions) {
         container.append(diagnosticRow('Custom Instructions', profile.customInstructions));
     }
+}
+
+function appendContextTaskState(container, taskState) {
+    if (!taskState) {
+        container.append(diagnosticEmpty('(not recorded)'));
+        return;
+    }
+    container.append(diagnosticRow('Task', taskState.taskName || '—'));
+    container.append(diagnosticRow('Stage', taskState.stage || '—'));
+    container.append(diagnosticRow('Current Step', taskState.currentStep || '—'));
+    container.append(diagnosticRow('Expected Action Type', taskState.expectedActionType || '—'));
+    container.append(
+        diagnosticRow('Expected Action Description', taskState.expectedActionDescription || '—'),
+    );
+    container.append(diagnosticRow('Paused', String(taskState.paused === true)));
 }
 
 function appendContextEntries(container, entries) {
