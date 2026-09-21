@@ -11,6 +11,8 @@ import com.example.aiagent.memory.MemoryEntry
 import com.example.aiagent.memory.MemoryLayerUpdate
 import com.example.aiagent.memory.MemoryUpdate
 import com.example.aiagent.task.DeterministicTaskStateMachine
+import com.example.aiagent.llm.LlmProvider
+import com.example.aiagent.llm.TokenUsage
 import com.example.aiagent.task.ExpectedActionType
 import com.example.aiagent.task.InvalidTaskStateException
 import com.example.aiagent.task.InvalidTaskTransitionException
@@ -23,6 +25,11 @@ import com.example.aiagent.task.TaskStage
 import com.example.aiagent.task.TaskStateHistoryEvent
 import com.example.aiagent.task.TaskStateService
 import com.example.aiagent.task.TaskStatus
+import com.example.aiagent.task.TaskActionType
+import com.example.aiagent.task.TaskCoordinationResult
+import com.example.aiagent.task.TaskEventSource
+import com.example.aiagent.task.TaskStateConflictException
+import com.example.aiagent.task.TaskLifecycleGuard
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
@@ -30,6 +37,7 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import org.sqlite.SQLiteDataSource
+import io.mockk.mockk
 import org.springframework.dao.DataAccessException
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.jdbc.datasource.DataSourceTransactionManager
@@ -208,11 +216,13 @@ class SqliteTaskStateIntegrationTest {
                     expectedActionType = ExpectedActionType.AGENT_ACTION,
                     expectedActionDescription = "Implement Room and Booking repositories",
                     proposedEvent = TaskEvent.PLAN_APPROVED,
+                    requestedAction = TaskActionType.IMPLEMENT,
                 ),
                 TaskProgressProposal(
                     currentStep = "Implement persistence layer: Room and Booking",
                     expectedActionType = ExpectedActionType.AGENT_ACTION,
                     expectedActionDescription = "Create Room and Booking persistence components",
+                    requestedAction = TaskActionType.IMPLEMENT,
                 ),
             ),
         )
@@ -220,23 +230,39 @@ class SqliteTaskStateIntegrationTest {
             override fun analyze(
                 task: com.example.aiagent.task.AgentTask,
                 userMessage: ChatMessage,
-            ): TaskProgressProposal = proposals.removeFirst()
+            ): com.example.aiagent.task.TaskProgressAnalysis {
+                val proposal = proposals.removeFirst()
+                return com.example.aiagent.task.TaskProgressAnalysis(
+                    proposal = proposal,
+                    provider = LlmProvider.OPENAI,
+                    model = "fake-analyzer",
+                    usage = TokenUsage(2, 1, 3),
+                    responseTimeMs = 1,
+                )
+            }
         }
         val coordinator = TaskStateCoordinator(
             TaskStateProperties(TaskProgressAnalyzerProperties(enabled = true)),
             analyzer,
             service,
+            stateMachine,
+            TaskLifecycleGuard(),
+            mockk(relaxed = true),
         )
         val created = repository.create("Booking")
 
-        val execution = coordinator.analyzeBeforeMainRequest(
-            created,
-            ChatMessage(Role.USER, "План подтверждаю. Начинай реализацию."),
-        )
-        val updatedExecution = coordinator.analyzeBeforeMainRequest(
-            execution,
-            ChatMessage(Role.USER, "Начни с persistence layer. Нужны Room и Booking."),
-        )
+        val execution = (
+            coordinator.analyzeBeforeMainRequest(
+                created,
+                ChatMessage(Role.USER, "План подтверждаю. Начинай реализацию."),
+            ) as TaskCoordinationResult.Ready
+        ).task
+        val updatedExecution = (
+            coordinator.analyzeBeforeMainRequest(
+                execution,
+                ChatMessage(Role.USER, "Начни с persistence layer. Нужны Room и Booking."),
+            ) as TaskCoordinationResult.Ready
+        ).task
         val validation = service.applyEvent(updatedExecution.id, TaskEvent.EXECUTION_COMPLETED)
 
         assertEquals(TaskStage.EXECUTION, execution.stage)
@@ -245,6 +271,7 @@ class SqliteTaskStateIntegrationTest {
         assertEquals(TaskStage.VALIDATION, validation.stage)
         assertEquals(
             listOf(
+                TaskStage.PLANNING to TaskEvent.PLAN_APPROVED,
                 TaskStage.PLANNING to TaskEvent.PLAN_APPROVED,
                 TaskStage.EXECUTION to TaskEvent.EXECUTION_COMPLETED,
             ),
@@ -291,6 +318,127 @@ class SqliteTaskStateIntegrationTest {
         assertEquals(listOf(TaskStateHistoryEvent.TASK_CREATED), service.history(task.id).map { it.event })
     }
 
+    @Test
+    fun `stale concurrent event is rejected by version without extra history`() {
+        val fixture = fixture("version-conflict.db")
+        val task = fixture.repository.create("Concurrent Task")
+        val first = fixture.service.applyEvent(
+            task.id,
+            TaskEvent.PLAN_APPROVED,
+            source = TaskEventSource.REST_API,
+            expectedVersion = task.version,
+        )
+        val historyAfterFirst = fixture.service.history(task.id)
+
+        assertThrows(TaskStateConflictException::class.java) {
+            fixture.service.pause(
+                task.id,
+                source = TaskEventSource.REST_API,
+                expectedVersion = task.version,
+            )
+        }
+
+        val actual = fixture.service.state(task.id)
+        assertEquals(TaskStage.EXECUTION, actual.stage)
+        assertEquals(first.version, actual.version)
+        assertEquals(historyAfterFirst, fixture.service.history(task.id))
+    }
+
+    @Test
+    fun `paused Task rejects events and repeated pause resume without state damage`() {
+        val fixture = fixture("paused-conflicts.db")
+        val task = fixture.repository.create("Paused Task")
+        val paused = fixture.service.pause(task.id)
+        val pausedHistory = fixture.service.history(task.id)
+
+        assertThrows(InvalidTaskStateException::class.java) { fixture.service.pause(task.id) }
+        assertThrows(InvalidTaskStateException::class.java) {
+            fixture.service.applyEvent(task.id, TaskEvent.PLAN_APPROVED)
+        }
+        assertEquals(paused, fixture.service.state(task.id))
+        assertEquals(pausedHistory, fixture.service.history(task.id))
+
+        val resumed = fixture.service.resume(task.id)
+        val resumedHistory = fixture.service.history(task.id)
+        assertThrows(InvalidTaskStateException::class.java) { fixture.service.resume(task.id) }
+        assertEquals(resumed, fixture.service.state(task.id))
+        assertEquals(resumedHistory, fixture.service.history(task.id))
+    }
+
+    @Test
+    fun `transition validates proposal text and uses safe fallback defaults`() {
+        val fixture = fixture("proposal-fallback.db")
+        val task = fixture.repository.create("Fallback Task")
+
+        val execution = fixture.service.applyEvent(
+            task.id,
+            TaskEvent.PLAN_APPROVED,
+            TaskProgressProposal(
+                currentStep = " ",
+                expectedActionType = ExpectedActionType.AGENT_ACTION,
+                expectedActionDescription = "x".repeat(TaskStateService.MAX_EXPECTED_ACTION_DESCRIPTION_LENGTH + 1),
+            ),
+        )
+
+        assertEquals("Execute the approved plan", execution.currentStep)
+        assertEquals(ExpectedActionType.AGENT_ACTION, execution.expectedActionType)
+        assertEquals("Perform the next implementation step", execution.expectedActionDescription)
+        val history = fixture.service.history(task.id).last()
+        assertEquals(TaskEventSource.REST_API, history.source)
+        assertEquals(execution.expectedActionType, history.expectedActionType)
+        assertEquals(execution.expectedActionDescription, history.expectedActionDescription)
+        assertEquals(execution.version, history.version)
+    }
+
+    @Test
+    fun `legacy SQLite schema migrates all lifecycle fields and completed state`() {
+        val jdbc = JdbcTemplate(dataSource(tempDirectory.resolve("legacy-schema.db")))
+        jdbc.execute(
+            """
+            CREATE TABLE agent_task (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            )
+            """.trimIndent(),
+        )
+        jdbc.update(
+            """
+            INSERT INTO agent_task(id, name, status, created_at, completed_at)
+            VALUES (7, 'Legacy completed', 'COMPLETED', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z')
+            """.trimIndent(),
+        )
+
+        val repository = SqliteTaskRepository(jdbc)
+        val restored = checkNotNull(repository.findById(7))
+        val taskColumns = jdbc.queryForList("PRAGMA table_info(agent_task)")
+            .map { it["name"].toString() }
+        val historyColumns = jdbc.queryForList("PRAGMA table_info(task_state_history)")
+            .map { it["name"].toString() }
+
+        assertTrue(
+            setOf(
+                "stage",
+                "current_step",
+                "expected_action_type",
+                "expected_action_description",
+                "paused",
+                "version",
+            ).all(taskColumns::contains),
+        )
+        assertTrue(
+            setOf("source", "expected_action_type", "expected_action_description", "version")
+                .all(historyColumns::contains),
+        )
+        assertEquals(TaskStage.DONE, restored.stage)
+        assertEquals(ExpectedActionType.NONE, restored.expectedActionType)
+        assertFalse(restored.paused)
+        assertEquals(0, restored.version)
+        assertEquals(TaskStateHistoryEvent.TASK_CREATED, repository.stateHistory(7).single().event)
+    }
+
     private fun assertPauseRoundTrip(service: TaskStateService, taskId: Long, stage: TaskStage) {
         val before = service.state(taskId)
         val paused = service.pause(taskId)
@@ -298,12 +446,14 @@ class SqliteTaskStateIntegrationTest {
         assertTrue(paused.paused)
         assertEquals(before.currentStep, paused.currentStep)
         assertEquals(before.expectedAction, paused.expectedAction)
+        assertEquals(before.version + 1, paused.version)
 
         val resumed = service.resume(taskId)
         assertEquals(stage, resumed.stage)
         assertFalse(resumed.paused)
         assertEquals(before.currentStep, resumed.currentStep)
         assertEquals(before.expectedAction, resumed.expectedAction)
+        assertEquals(paused.version + 1, resumed.version)
     }
 
     private fun proposal(

@@ -5,7 +5,6 @@ import org.springframework.stereotype.Service
 @Service
 class TaskService(
     private val repository: TaskRepository,
-    private val taskStateService: TaskStateService,
 ) {
     fun tasks(): List<AgentTask> = repository.findAll()
 
@@ -22,8 +21,6 @@ class TaskService(
 
     fun activate(taskId: Long): AgentTask = repository.activate(taskId)
 
-    fun complete(taskId: Long): AgentTask =
-        taskStateService.applyEvent(taskId, TaskEvent.VALIDATION_PASSED)
 
     companion object {
         const val MAX_NAME_LENGTH = 120

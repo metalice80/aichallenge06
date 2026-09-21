@@ -16,6 +16,10 @@ import com.example.aiagent.llm.LlmServerException
 import com.example.aiagent.llm.LlmTimeoutException
 import com.example.aiagent.llm.MissingApiKeyException
 import com.example.aiagent.profile.InvalidUserProfileException
+import com.example.aiagent.task.InvalidTaskStateException
+import com.example.aiagent.task.InvalidTaskTransitionException
+import com.example.aiagent.task.TaskNotFoundException
+import com.example.aiagent.task.TaskStateConflictException
 import com.example.aiagent.web.dto.ApiError
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpStatus
@@ -51,6 +55,34 @@ class ApiExceptionHandler {
     @ExceptionHandler(TaskInvariantNotFoundException::class)
     fun handleInvariantNotFound(exception: TaskInvariantNotFoundException): ResponseEntity<ApiError> =
         error(HttpStatus.NOT_FOUND, exception.message ?: "Task Invariant не найден.")
+
+    @ExceptionHandler(InvalidTaskTransitionException::class)
+    fun handleInvalidTaskTransition(
+        exception: InvalidTaskTransitionException,
+    ): ResponseEntity<ApiError> = error(
+        HttpStatus.CONFLICT,
+        exception.message ?: "Недопустимый переход Task State.",
+        code = "INVALID_TASK_TRANSITION",
+        currentStage = exception.currentStage,
+        event = exception.event,
+    )
+
+    @ExceptionHandler(TaskNotFoundException::class)
+    fun handleTaskNotFound(exception: TaskNotFoundException): ResponseEntity<ApiError> =
+        error(HttpStatus.NOT_FOUND, exception.message ?: "Task не найдена.", exception.code)
+
+    @ExceptionHandler(TaskStateConflictException::class)
+    fun handleTaskStateConflict(exception: TaskStateConflictException): ResponseEntity<ApiError> =
+        error(
+            HttpStatus.CONFLICT,
+            exception.message ?: "Task State изменился конкурентно.",
+            exception.code,
+            version = exception.actualVersion,
+        )
+
+    @ExceptionHandler(InvalidTaskStateException::class)
+    fun handleInvalidTaskState(exception: InvalidTaskStateException): ResponseEntity<ApiError> =
+        error(HttpStatus.CONFLICT, exception.message ?: "Недопустимое состояние Task.", exception.code)
 
     @ExceptionHandler(
         HttpMessageNotReadableException::class,
@@ -137,6 +169,13 @@ class ApiExceptionHandler {
         return error(status, message)
     }
 
-    private fun error(status: HttpStatus, message: String): ResponseEntity<ApiError> =
-        ResponseEntity.status(status).body(ApiError(message))
+    private fun error(
+        status: HttpStatus,
+        message: String,
+        code: String = status.name,
+        currentStage: com.example.aiagent.task.TaskStage? = null,
+        event: com.example.aiagent.task.TaskEvent? = null,
+        version: Long? = null,
+    ): ResponseEntity<ApiError> =
+        ResponseEntity.status(status).body(ApiError(code, message, currentStage, event, version))
 }

@@ -13,10 +13,7 @@ import com.example.aiagent.web.dto.ConversationBranchResponse
 import com.example.aiagent.web.dto.CreateTaskRequest
 import com.example.aiagent.web.dto.LlmProviderOptionResponse
 import com.example.aiagent.web.dto.MemoryInspectorResponse
-import com.example.aiagent.web.dto.TaskEventRequest
 import com.example.aiagent.web.dto.TaskResponse
-import com.example.aiagent.web.dto.TaskStateHistoryResponse
-import com.example.aiagent.web.dto.UpdateTaskProgressRequest
 import jakarta.validation.Valid
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.GetMapping
@@ -60,42 +57,6 @@ class ChatController(
     fun activateTask(@PathVariable taskId: Long): ChatStateResponse =
         ChatStateResponse.from(agent.activateTask(taskId))
 
-    @PostMapping("/tasks/{taskId}/complete")
-    fun completeTask(@PathVariable taskId: Long): TaskResponse =
-        TaskResponse.from(agent.completeTask(taskId))
-
-    @PostMapping("/tasks/{taskId}/events")
-    fun applyTaskEvent(
-        @PathVariable taskId: Long,
-        @Valid @RequestBody request: TaskEventRequest,
-    ): TaskResponse = TaskResponse.from(
-        agent.applyTaskEvent(taskId, request.event, request.proposal()),
-    )
-
-    @PostMapping("/tasks/{taskId}/progress")
-    fun updateTaskProgress(
-        @PathVariable taskId: Long,
-        @Valid @RequestBody request: UpdateTaskProgressRequest,
-    ): TaskResponse = TaskResponse.from(
-        agent.updateTaskProgress(
-            taskId,
-            request.currentStep,
-            request.expectedActionType,
-            request.expectedActionDescription,
-        ),
-    )
-
-    @PostMapping("/tasks/{taskId}/pause")
-    fun pauseTask(@PathVariable taskId: Long): TaskResponse =
-        TaskResponse.from(agent.pauseTask(taskId))
-
-    @PostMapping("/tasks/{taskId}/resume")
-    fun resumeTask(@PathVariable taskId: Long): TaskResponse =
-        TaskResponse.from(agent.resumeTask(taskId))
-
-    @GetMapping("/tasks/{taskId}/history")
-    fun taskStateHistory(@PathVariable taskId: Long): List<TaskStateHistoryResponse> =
-        agent.taskStateHistory(taskId).map(TaskStateHistoryResponse::from)
 
     @GetMapping("/branches")
     fun branches(): List<ConversationBranchResponse> =

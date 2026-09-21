@@ -1,5 +1,6 @@
 package com.example.aiagent.task
 
+import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.time.Instant
@@ -21,12 +22,28 @@ class TaskStateService(
         taskId: Long,
         event: TaskEvent,
         proposal: TaskProgressProposal? = null,
+        source: TaskEventSource = TaskEventSource.REST_API,
+        expectedVersion: Long? = null,
     ): AgentTask {
         val current = requireTask(taskId)
-        ensureMutable(current)
-        val nextStage = stateMachine.transition(current.stage, event)
+        verifyExpectedVersion(current, expectedVersion)
+        if (current.paused) throw TaskPausedException(taskId)
+
+        val nextStage = try {
+            stateMachine.transition(current.stage, event)
+        } catch (exception: InvalidTaskTransitionException) {
+            logger.info(
+                "Task state event task={} event={} source={} from={} paused={} result=REJECTED code=INVALID_TASK_TRANSITION",
+                taskId,
+                event,
+                source,
+                current.stage,
+                current.paused,
+            )
+            throw exception
+        }
         val defaults = defaultProgress(event)
-        val currentStep = normalizedCurrentStep(proposal?.currentStep ?: defaults.currentStep)
+        val currentStep = normalizedCurrentStep(proposal?.currentStep, defaults.currentStep)
         val expectedActionType = if (nextStage == TaskStage.DONE) {
             ExpectedActionType.NONE
         } else {
@@ -34,11 +51,12 @@ class TaskStateService(
         }
         val expectedActionDescription = normalizedActionDescription(
             expectedActionType,
-            if (nextStage == TaskStage.DONE) null else proposal?.expectedActionDescription
-                ?: defaults.expectedActionDescription,
+            if (nextStage == TaskStage.DONE) null else proposal?.expectedActionDescription,
+            defaults.expectedActionDescription,
         )
         val now = Instant.now()
-        return repository.updateState(
+        val nextVersion = current.version + 1
+        val updated = repository.updateState(
             taskId = taskId,
             state = PersistedTaskState(
                 stage = nextStage,
@@ -48,151 +66,209 @@ class TaskStateService(
                 paused = false,
                 status = if (nextStage == TaskStage.DONE) TaskStatus.COMPLETED else TaskStatus.ACTIVE,
                 completedAt = if (nextStage == TaskStage.DONE) now else null,
+                expectedVersion = current.version,
             ),
             history = NewTaskStateHistoryEntry(
                 taskId = taskId,
                 event = TaskStateHistoryEvent.from(event),
+                source = source,
                 fromStage = current.stage,
                 toStage = nextStage,
                 paused = false,
                 currentStep = currentStep,
-                description = expectedActionDescription,
+                expectedActionType = expectedActionType,
+                expectedActionDescription = expectedActionDescription,
+                version = nextVersion,
                 createdAt = now,
             ),
         )
+        logger.info(
+            "Task state event task={} event={} source={} from={} to={} paused={} result=APPLIED version={}",
+            taskId,
+            event,
+            source,
+            current.stage,
+            nextStage,
+            updated.paused,
+            updated.version,
+        )
+        return updated
     }
 
     @Transactional
-    fun updateProgress(
+    fun applyProposal(
         taskId: Long,
-        currentStep: String,
-        expectedActionType: ExpectedActionType,
-        expectedActionDescription: String?,
+        proposal: TaskProgressProposal,
+        source: TaskEventSource = TaskEventSource.CHAT_ANALYZER,
+        expectedVersion: Long? = null,
     ): AgentTask {
+        proposal.proposedEvent?.let {
+            return applyEvent(taskId, it, proposal, source, expectedVersion)
+        }
         val current = requireTask(taskId)
-        ensureMutable(current)
-        val normalizedStep = normalizedCurrentStep(currentStep)
-        val normalizedDescription = normalizedActionDescription(expectedActionType, expectedActionDescription)
+        verifyExpectedVersion(current, expectedVersion)
+        ensureProgressMutable(current)
+
+        val currentStep = normalizedCurrentStep(proposal.currentStep, current.currentStep)
+        val expectedActionType = proposal.expectedActionType ?: current.expectedActionType
+        val expectedDescriptionFallback = if (expectedActionType == current.expectedActionType) {
+            current.expectedActionDescription
+        } else {
+            defaultProgress(current.stage).expectedActionDescription
+        }
+        val expectedActionDescription = normalizedActionDescription(
+            expectedActionType,
+            proposal.expectedActionDescription,
+            expectedDescriptionFallback,
+        )
+        if (
+            currentStep == current.currentStep &&
+            expectedActionType == current.expectedActionType &&
+            expectedActionDescription == current.expectedActionDescription
+        ) {
+            return current
+        }
+
         val now = Instant.now()
         return repository.updateState(
             taskId,
             current.toPersistedState(
-                currentStep = normalizedStep,
+                currentStep = currentStep,
                 expectedActionType = expectedActionType,
-                expectedActionDescription = normalizedDescription,
+                expectedActionDescription = expectedActionDescription,
             ),
             NewTaskStateHistoryEntry(
                 taskId = taskId,
                 event = TaskStateHistoryEvent.PROGRESS_UPDATED,
+                source = source,
                 fromStage = current.stage,
                 toStage = current.stage,
                 paused = current.paused,
-                currentStep = normalizedStep,
-                description = normalizedDescription,
+                currentStep = currentStep,
+                expectedActionType = expectedActionType,
+                expectedActionDescription = expectedActionDescription,
+                version = current.version + 1,
                 createdAt = now,
             ),
         )
     }
 
     @Transactional
-    fun pause(taskId: Long): AgentTask {
+    fun pause(
+        taskId: Long,
+        source: TaskEventSource = TaskEventSource.REST_API,
+        expectedVersion: Long? = null,
+    ): AgentTask {
         val current = requireTask(taskId)
+        verifyExpectedVersion(current, expectedVersion)
         if (current.stage == TaskStage.DONE) {
-            throw InvalidTaskStateException("DONE Task cannot be paused")
+            throw InvalidTaskStateException("DONE Task cannot be paused", "TASK_DONE")
         }
         if (current.paused) {
-            throw InvalidTaskStateException("Task $taskId is already paused")
+            throw InvalidTaskStateException("Task $taskId is already paused", "TASK_ALREADY_PAUSED")
         }
-        return updatePauseState(current, paused = true, TaskStateHistoryEvent.PAUSE)
+        return updatePauseState(current, paused = true, TaskStateHistoryEvent.PAUSE, source)
     }
 
     @Transactional
-    fun resume(taskId: Long): AgentTask {
+    fun resume(
+        taskId: Long,
+        source: TaskEventSource = TaskEventSource.REST_API,
+        expectedVersion: Long? = null,
+    ): AgentTask {
         val current = requireTask(taskId)
+        verifyExpectedVersion(current, expectedVersion)
         if (!current.paused) {
-            throw InvalidTaskStateException("Task $taskId is not paused")
+            throw InvalidTaskStateException("Task $taskId is not paused", "TASK_NOT_PAUSED")
         }
-        return updatePauseState(current, paused = false, TaskStateHistoryEvent.RESUME)
-    }
-
-    @Transactional
-    fun applyProposal(taskId: Long, proposal: TaskProgressProposal): AgentTask {
-        proposal.proposedEvent?.let { return applyEvent(taskId, it, proposal) }
-        val current = requireTask(taskId)
-        val currentStep = proposal.currentStep ?: current.currentStep
-        val actionType = proposal.expectedActionType ?: current.expectedActionType
-        val actionDescription = if (proposal.expectedActionType == null) {
-            current.expectedActionDescription
-        } else {
-            proposal.expectedActionDescription
-        }
-        if (
-            currentStep == current.currentStep &&
-            actionType == current.expectedActionType &&
-            actionDescription == current.expectedActionDescription
-        ) {
-            return current
-        }
-        return updateProgress(taskId, currentStep, actionType, actionDescription)
+        return updatePauseState(current, paused = false, TaskStateHistoryEvent.RESUME, source)
     }
 
     private fun updatePauseState(
         current: AgentTask,
         paused: Boolean,
         event: TaskStateHistoryEvent,
+        source: TaskEventSource,
     ): AgentTask {
         val now = Instant.now()
-        return repository.updateState(
+        val updated = repository.updateState(
             current.id,
             current.toPersistedState(paused = paused),
             NewTaskStateHistoryEntry(
                 taskId = current.id,
                 event = event,
+                source = source,
                 fromStage = current.stage,
                 toStage = current.stage,
                 paused = paused,
                 currentStep = current.currentStep,
-                description = current.expectedActionDescription,
+                expectedActionType = current.expectedActionType,
+                expectedActionDescription = current.expectedActionDescription,
+                version = current.version + 1,
                 createdAt = now,
             ),
         )
+        logger.info(
+            "Task state event task={} event={} source={} from={} to={} paused={} result=APPLIED version={}",
+            current.id,
+            event,
+            source,
+            current.stage,
+            current.stage,
+            updated.paused,
+            updated.version,
+        )
+        return updated
     }
 
-    private fun ensureMutable(task: AgentTask) {
+    private fun verifyExpectedVersion(current: AgentTask, expectedVersion: Long?) {
+        if (expectedVersion != null && current.version != expectedVersion) {
+            throw TaskStateConflictException(current.id, expectedVersion, current.version)
+        }
+    }
+
+    private fun ensureProgressMutable(task: AgentTask) {
         if (task.stage == TaskStage.DONE || task.status == TaskStatus.COMPLETED) {
-            throw InvalidTaskStateException("Completed Task is read-only")
+            throw InvalidTaskStateException("Completed Task is read-only", "TASK_DONE")
         }
-        if (task.paused) {
-            throw InvalidTaskStateException("Paused Task must be resumed before its state can change")
-        }
+        if (task.paused) throw TaskPausedException(task.id)
     }
 
     private fun requireTask(taskId: Long): AgentTask =
-        repository.findById(taskId) ?: throw InvalidTaskStateException("Task $taskId does not exist")
+        repository.findById(taskId) ?: throw TaskNotFoundException(taskId)
 
-    private fun normalizedCurrentStep(value: String): String {
-        val normalized = value.trim()
-        if (normalized.isEmpty()) {
-            throw InvalidTaskStateException("Current step must not be blank")
+    private fun normalizedCurrentStep(value: String?, fallback: String): String {
+        val normalized = value?.trim()
+        return if (
+            normalized.isNullOrEmpty() ||
+            normalized.length > MAX_CURRENT_STEP_LENGTH
+        ) {
+            fallback
+        } else {
+            normalized
         }
-        if (normalized.length > MAX_CURRENT_STEP_LENGTH) {
-            throw InvalidTaskStateException("Current step must not exceed $MAX_CURRENT_STEP_LENGTH characters")
-        }
-        return normalized
     }
 
-    private fun normalizedActionDescription(type: ExpectedActionType, value: String?): String? {
+    private fun normalizedActionDescription(
+        type: ExpectedActionType,
+        value: String?,
+        fallback: String?,
+    ): String? {
         if (type == ExpectedActionType.NONE) return null
-        val normalized = value?.trim().orEmpty()
-        if (normalized.isEmpty()) {
-            throw InvalidTaskStateException("Expected action description is required for $type")
+        val normalized = value?.trim()
+        if (!normalized.isNullOrEmpty() && normalized.length <= MAX_EXPECTED_ACTION_DESCRIPTION_LENGTH) {
+            return normalized
         }
-        if (normalized.length > MAX_EXPECTED_ACTION_DESCRIPTION_LENGTH) {
-            throw InvalidTaskStateException(
-                "Expected action description must not exceed $MAX_EXPECTED_ACTION_DESCRIPTION_LENGTH characters",
-            )
+        val normalizedFallback = fallback?.trim()
+        if (!normalizedFallback.isNullOrEmpty() &&
+            normalizedFallback.length <= MAX_EXPECTED_ACTION_DESCRIPTION_LENGTH
+        ) {
+            return normalizedFallback
         }
-        return normalized
+        throw InvalidTaskStateException(
+            "Expected action description is required for $type",
+            "INVALID_EXPECTED_ACTION",
+        )
     }
 
     private fun defaultProgress(event: TaskEvent): Progress = when (event) {
@@ -218,6 +294,17 @@ class TaskStateService(
         )
     }
 
+    private fun defaultProgress(stage: TaskStage): Progress = when (stage) {
+        TaskStage.PLANNING -> Progress(
+            "Define goals, requirements, and execution plan",
+            ExpectedActionType.USER_CONFIRMATION,
+            "Approve the plan before implementation",
+        )
+        TaskStage.EXECUTION -> defaultProgress(TaskEvent.PLAN_APPROVED)
+        TaskStage.VALIDATION -> defaultProgress(TaskEvent.EXECUTION_COMPLETED)
+        TaskStage.DONE -> defaultProgress(TaskEvent.VALIDATION_PASSED)
+    }
+
     private data class Progress(
         val currentStep: String,
         val expectedActionType: ExpectedActionType,
@@ -227,6 +314,7 @@ class TaskStateService(
     companion object {
         const val MAX_CURRENT_STEP_LENGTH = 500
         const val MAX_EXPECTED_ACTION_DESCRIPTION_LENGTH = 1_000
+        private val logger = LoggerFactory.getLogger(TaskStateService::class.java)
     }
 }
 
@@ -243,4 +331,5 @@ private fun AgentTask.toPersistedState(
     paused = paused,
     status = status,
     completedAt = completedAt,
+    expectedVersion = version,
 )

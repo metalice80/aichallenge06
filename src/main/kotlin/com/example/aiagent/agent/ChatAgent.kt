@@ -24,14 +24,12 @@ import com.example.aiagent.memory.MemoryService
 import com.example.aiagent.persistence.ConversationRepository
 import com.example.aiagent.profile.UserProfileService
 import com.example.aiagent.task.AgentTask
-import com.example.aiagent.task.ExpectedActionType
-import com.example.aiagent.task.TaskEvent
-import com.example.aiagent.task.TaskProgressProposal
+import com.example.aiagent.task.InvalidTaskStateException
+import com.example.aiagent.task.TaskPausedException
+import com.example.aiagent.task.TaskCoordinationResult
 import com.example.aiagent.task.TaskService
+import com.example.aiagent.task.TaskStage
 import com.example.aiagent.task.TaskStateCoordinator
-import com.example.aiagent.task.TaskStateHistoryEntry
-import com.example.aiagent.task.TaskStateService
-import com.example.aiagent.task.TaskStatus
 import org.springframework.stereotype.Service
 
 @Service
@@ -43,7 +41,6 @@ class ChatAgent(
     private val contextStateService: ContextStateService,
     private val branchService: ConversationBranchService,
     private val taskService: TaskService,
-    private val taskStateService: TaskStateService,
     private val taskInvariantService: TaskInvariantService,
     private val invariantGuardService: InvariantGuardService,
     private val taskStateCoordinator: TaskStateCoordinator,
@@ -70,12 +67,6 @@ class ChatAgent(
             throw InvalidMessageException("Model must not exceed $MAX_MODEL_LENGTH characters")
         }
         val initialTask = taskService.activeTask()
-        if (initialTask.status == TaskStatus.COMPLETED) {
-            throw InvalidMessageException("Completed Task is read-only")
-        }
-        if (initialTask.paused) {
-            throw InvalidMessageException("Paused Task must be resumed before continuing")
-        }
 
         val userMessage = ChatMessage(Role.USER, content)
         val invariantSet = try {
@@ -148,7 +139,11 @@ class ChatAgent(
         val previousMessages = conversation.messages()
         val previousTokenUsage = conversation.tokenUsage()
         val previousSummary = conversation.summary()
-        val task = taskStateCoordinator.analyzeBeforeMainRequest(initialTask, userMessage)
+        val coordination = taskStateCoordinator.analyzeBeforeMainRequest(initialTask, userMessage)
+        if (coordination is TaskCoordinationResult.Blocked) {
+            return guardRefusalResponse(request, coordination.message)
+        }
+        val task = (coordination as TaskCoordinationResult.Ready).task
         val contextStrategy = contextStrategyResolver.resolve(request.contextStrategy)
         val contextPlan = contextStrategy.buildContext(conversation)
         val memoryContext = memoryService.context(task)
@@ -200,7 +195,9 @@ class ChatAgent(
             throw exception
         }
         contextStrategy.afterSuccessfulExchange(conversation, userMessage, assistantMessage)
-        memoryService.extractAfterSuccessfulExchange(task, userMessage)
+        if (task.stage != TaskStage.DONE) {
+            memoryService.extractAfterSuccessfulExchange(task, userMessage)
+        }
 
         return AgentResponse(
             provider = request.provider,
@@ -423,54 +420,28 @@ class ChatAgent(
         return currentState()
     }
 
-    @Synchronized
-    override fun completeTask(taskId: Long): AgentTask = taskService.complete(taskId)
-
-    @Synchronized
-    override fun applyTaskEvent(
-        taskId: Long,
-        event: TaskEvent,
-        proposal: TaskProgressProposal?,
-    ): AgentTask = taskStateService.applyEvent(taskId, event, proposal)
-
-    @Synchronized
-    override fun updateTaskProgress(
-        taskId: Long,
-        currentStep: String,
-        expectedActionType: ExpectedActionType,
-        expectedActionDescription: String?,
-    ): AgentTask = taskStateService.updateProgress(
-        taskId,
-        currentStep,
-        expectedActionType,
-        expectedActionDescription,
-    )
-
-    @Synchronized
-    override fun pauseTask(taskId: Long): AgentTask = taskStateService.pause(taskId)
-
-    @Synchronized
-    override fun resumeTask(taskId: Long): AgentTask = taskStateService.resume(taskId)
-
-    override fun taskStateHistory(taskId: Long): List<TaskStateHistoryEntry> =
-        taskStateService.history(taskId)
 
     override fun branches(): List<ConversationBranch> =
         branchService.branches(conversation.taskId)
 
     @Synchronized
-    override fun createBranch(): ConversationBranch =
-        branchService.createBranch(conversation.taskId, conversation.messages())
+    override fun createBranch(): ConversationBranch {
+        ensureConversationMutable()
+        return branchService.createBranch(conversation.taskId, conversation.messages())
+    }
 
     @Synchronized
-    override fun activateBranch(branchId: Long): AgentState = AgentState(
-        messages = branchService.activateBranch(
-            conversation.taskId,
-            branchId,
-            conversation.messages(),
-        ),
-        conversationUsage = conversation.tokenUsage(),
-    )
+    override fun activateBranch(branchId: Long): AgentState {
+        ensureConversationMutable()
+        return AgentState(
+            messages = branchService.activateBranch(
+                conversation.taskId,
+                branchId,
+                conversation.messages(),
+            ),
+            conversationUsage = conversation.tokenUsage(),
+        )
+    }
 
     @Synchronized
     override fun memory(contextStrategy: ContextStrategyType): MemoryInspector {
@@ -482,18 +453,29 @@ class ChatAgent(
 
     @Synchronized
     override fun clearWorkingMemory() {
+        ensureConversationMutable()
         memoryService.clearWorking(conversation.taskId)
     }
 
     @Synchronized
     override fun clearLongTermMemory() {
+        ensureConversationMutable()
         memoryService.clearLongTerm()
     }
 
     @Synchronized
     override fun reset() {
+        ensureConversationMutable()
         contextStateService.reset(conversation.taskId)
         conversation.clear()
+    }
+
+    private fun ensureConversationMutable() {
+        val task = taskService.activeTask()
+        if (task.paused) throw TaskPausedException(task.id)
+        if (task.stage == TaskStage.DONE) {
+            throw InvalidTaskStateException("Completed Task is read-only", "TASK_DONE")
+        }
     }
 
     private fun currentState() = AgentState(

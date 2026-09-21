@@ -31,12 +31,14 @@ data class AgentTask(
         "Provide goals, requirements, and constraints"
     },
     val paused: Boolean = false,
+    val version: Long = 0,
 ) {
     init {
         require((status == TaskStatus.COMPLETED) == (stage == TaskStage.DONE)) {
             "Task status $status is inconsistent with stage $stage"
         }
         require(stage != TaskStage.DONE || !paused) { "DONE Task cannot be paused" }
+        require(version >= 0) { "Task version must not be negative" }
         require(stage != TaskStage.DONE || expectedActionType == ExpectedActionType.NONE) {
             "DONE Task must not expect another action"
         }
@@ -53,5 +55,6 @@ data class AgentTask(
         expectedActionType = expectedActionType,
         expectedActionDescription = expectedActionDescription,
         paused = paused,
+        version = version,
     )
 }

@@ -253,6 +253,7 @@ class SqliteMemoryLayersIntegrationTest {
                 customInstructions = "Prefer Kotlin.",
             ),
             workingMemory = listOf(MemoryEntry("database", "PostgreSQL")),
+            taskState = task.stateSnapshot(),
             taskInvariants = listOf(
                 TaskInvariantSnapshot(
                     id = 17,

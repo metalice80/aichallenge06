@@ -19,6 +19,8 @@ import com.example.aiagent.profile.ResponseStyle
 import com.example.aiagent.profile.UserProfileInput
 import com.example.aiagent.profile.UserProfileService
 import com.example.aiagent.task.TaskService
+import com.example.aiagent.task.TaskStateService
+import com.example.aiagent.task.InvalidTaskStateException
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
@@ -46,6 +48,9 @@ class BookingServiceInvariantAcceptanceTest {
 
     @Autowired
     private lateinit var taskService: TaskService
+
+    @Autowired
+    private lateinit var taskStateService: TaskStateService
 
     @Autowired
     private lateinit var invariantService: TaskInvariantService
@@ -178,6 +183,7 @@ class BookingServiceInvariantAcceptanceTest {
         assertTrue("INVARIANT_INPUT_GUARD" in purposes)
         assertTrue("INVARIANT_OUTPUT_GUARD" in purposes)
         assertTrue("INVARIANT_CORRECTIVE_RETRY" in purposes)
+        assertTrue("TASK_PROGRESS_ANALYZER" in purposes)
         val persistedMainUsage = jdbcTemplate.queryForObject(
             "SELECT COALESCE(SUM(total_tokens), 0) FROM llm_request_usage WHERE task_id = ? AND purpose = 'MAIN_REQUEST'",
             Long::class.java,
@@ -201,9 +207,12 @@ class BookingServiceInvariantAcceptanceTest {
         profileService.activate(profile.id)
         assertEquals(5, invariantService.list(booking.id).size)
 
-        agent.pauseTask(booking.id)
+        taskStateService.pause(booking.id)
+        assertThrows(InvalidTaskStateException::class.java) {
+            create(booking.id, InvariantType.OTHER, "paused_change", "forbidden")
+        }
         assertEquals(5, invariantService.list(booking.id).size)
-        agent.resumeTask(booking.id)
+        taskStateService.resume(booking.id)
         assertEquals(5, invariantService.list(booking.id).size)
 
         val other = taskService.create("Payments Service")

@@ -164,6 +164,7 @@ class EffectiveContextBuilderTest {
             expectedActionType = com.example.aiagent.task.ExpectedActionType.AGENT_ACTION,
             expectedActionDescription = "Propose repository implementation",
             paused = true,
+            version = 7,
         )
 
         val prepared = builder.build(
@@ -181,6 +182,9 @@ class EffectiveContextBuilderTest {
         assertTrue(prepared.messages[1].content.contains("Current Step: Implement persistence layer"))
         assertTrue(prepared.messages[1].content.contains("Expected Action Type: AGENT_ACTION"))
         assertTrue(prepared.messages[1].content.contains("Paused: true"))
+        assertTrue(prepared.messages[1].content.contains("Version: 7"))
+        assertTrue(prepared.messages[1].content.contains("LIFECYCLE RULES"))
+        assertTrue(prepared.messages[1].content.contains("Do not begin implementation before PLAN_APPROVED"))
         assertEquals(executionTask.stateSnapshot(), prepared.diagnostic.taskState)
         assertTrue(prepared.diagnostic.shortTerm.isEmpty())
     }

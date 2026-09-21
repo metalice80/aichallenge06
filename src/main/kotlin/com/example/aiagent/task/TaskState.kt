@@ -16,6 +16,21 @@ enum class TaskEvent {
     VALIDATION_FAILED,
 }
 
+enum class TaskActionType {
+    PLAN,
+    IMPLEMENT,
+    VALIDATE,
+    FINALIZE,
+    STATUS,
+    NONE,
+}
+
+enum class TaskEventSource {
+    USER_INTERFACE,
+    REST_API,
+    CHAT_ANALYZER,
+}
+
 enum class ExpectedActionType {
     USER_INPUT,
     USER_CONFIRMATION,
@@ -37,6 +52,7 @@ data class TaskStateSnapshot(
     val expectedActionType: ExpectedActionType,
     val expectedActionDescription: String?,
     val paused: Boolean,
+    val version: Long = 0,
 )
 
 enum class TaskStateHistoryEvent {
@@ -59,22 +75,28 @@ data class TaskStateHistoryEntry(
     val id: Long,
     val taskId: Long,
     val event: TaskStateHistoryEvent,
+    val source: TaskEventSource?,
     val fromStage: TaskStage?,
     val toStage: TaskStage,
     val paused: Boolean,
     val currentStep: String,
-    val description: String?,
+    val expectedActionType: ExpectedActionType,
+    val expectedActionDescription: String?,
+    val version: Long,
     val createdAt: Instant,
 )
 
 data class NewTaskStateHistoryEntry(
     val taskId: Long,
     val event: TaskStateHistoryEvent,
+    val source: TaskEventSource?,
     val fromStage: TaskStage?,
     val toStage: TaskStage,
     val paused: Boolean,
     val currentStep: String,
-    val description: String?,
+    val expectedActionType: ExpectedActionType,
+    val expectedActionDescription: String?,
+    val version: Long,
     val createdAt: Instant,
 )
 
@@ -86,6 +108,7 @@ data class PersistedTaskState(
     val paused: Boolean,
     val status: TaskStatus,
     val completedAt: Instant?,
+    val expectedVersion: Long,
 )
 
 data class TaskProgressProposal(
@@ -93,4 +116,6 @@ data class TaskProgressProposal(
     val expectedActionType: ExpectedActionType? = null,
     val expectedActionDescription: String? = null,
     val proposedEvent: TaskEvent? = null,
+    val requestedAction: TaskActionType? = null,
+    val reason: String? = null,
 )

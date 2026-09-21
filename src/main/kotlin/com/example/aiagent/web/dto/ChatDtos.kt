@@ -20,7 +20,6 @@ import com.example.aiagent.memory.MemoryInspector
 import com.example.aiagent.task.AgentTask
 import com.example.aiagent.task.ExpectedActionType
 import com.example.aiagent.task.TaskEvent
-import com.example.aiagent.task.TaskProgressProposal
 import com.example.aiagent.task.TaskService
 import com.example.aiagent.task.TaskStage
 import com.example.aiagent.task.TaskStateHistoryEntry
@@ -28,6 +27,7 @@ import com.example.aiagent.task.TaskStateService
 import com.example.aiagent.task.TaskStateSnapshot
 import com.example.aiagent.task.TaskStatus
 import jakarta.validation.constraints.NotBlank
+import com.fasterxml.jackson.annotation.JsonAnySetter
 import jakarta.validation.constraints.Size
 import java.time.Instant
 
@@ -59,27 +59,29 @@ data class CreateTaskRequest(
 
 data class TaskEventRequest(
     val event: TaskEvent,
-    @field:Size(max = TaskStateService.MAX_CURRENT_STEP_LENGTH)
-    val currentStep: String? = null,
-    val expectedActionType: ExpectedActionType? = null,
-    @field:Size(max = TaskStateService.MAX_EXPECTED_ACTION_DESCRIPTION_LENGTH)
-    val expectedActionDescription: String? = null,
+    val expectedVersion: Long? = null,
 ) {
-    fun proposal() = TaskProgressProposal(
-        currentStep = currentStep,
-        expectedActionType = expectedActionType,
-        expectedActionDescription = expectedActionDescription,
-    )
+    init {
+        require(expectedVersion == null || expectedVersion >= 0) {
+            "expectedVersion must not be negative"
+        }
+    }
+
+    @JsonAnySetter
+    fun rejectUnknownField(name: String, @Suppress("UNUSED_PARAMETER") value: Any?) {
+        throw IllegalArgumentException("Unknown Task event field: $name")
+    }
 }
 
-data class UpdateTaskProgressRequest(
-    @field:NotBlank(message = "Current step must not be blank.")
-    @field:Size(max = TaskStateService.MAX_CURRENT_STEP_LENGTH)
-    val currentStep: String,
-    val expectedActionType: ExpectedActionType,
-    @field:Size(max = TaskStateService.MAX_EXPECTED_ACTION_DESCRIPTION_LENGTH)
-    val expectedActionDescription: String? = null,
-)
+data class TaskVersionRequest(
+    val expectedVersion: Long? = null,
+) {
+    init {
+        require(expectedVersion == null || expectedVersion >= 0) {
+            "expectedVersion must not be negative"
+        }
+    }
+}
 
 data class TokenUsageResponse(
     val inputTokens: Long?,
@@ -210,6 +212,7 @@ data class TaskResponse(
     val expectedActionType: ExpectedActionType,
     val expectedActionDescription: String?,
     val paused: Boolean,
+    val version: Long,
 ) {
     companion object {
         fun from(task: AgentTask) = TaskResponse(
@@ -224,6 +227,7 @@ data class TaskResponse(
             expectedActionType = task.expectedActionType,
             expectedActionDescription = task.expectedActionDescription,
             paused = task.paused,
+            version = task.version,
         )
     }
 }
@@ -236,6 +240,7 @@ data class TaskStateSnapshotResponse(
     val expectedActionType: ExpectedActionType,
     val expectedActionDescription: String?,
     val paused: Boolean,
+    val version: Long,
 ) {
     companion object {
         fun from(state: TaskStateSnapshot) = TaskStateSnapshotResponse(
@@ -246,6 +251,32 @@ data class TaskStateSnapshotResponse(
             expectedActionType = state.expectedActionType,
             expectedActionDescription = state.expectedActionDescription,
             paused = state.paused,
+            version = state.version,
+        )
+    }
+}
+
+data class ExpectedActionResponse(
+    val type: ExpectedActionType,
+    val description: String?,
+)
+
+data class TaskStateResponse(
+    val taskId: Long,
+    val stage: TaskStage,
+    val currentStep: String,
+    val expectedAction: ExpectedActionResponse,
+    val paused: Boolean,
+    val version: Long,
+) {
+    companion object {
+        fun from(task: AgentTask) = TaskStateResponse(
+            taskId = task.id,
+            stage = task.stage,
+            currentStep = task.currentStep,
+            expectedAction = ExpectedActionResponse(task.expectedActionType, task.expectedActionDescription),
+            paused = task.paused,
+            version = task.version,
         )
     }
 }
@@ -254,11 +285,13 @@ data class TaskStateHistoryResponse(
     val id: Long,
     val taskId: Long,
     val event: String,
+    val source: String?,
     val fromStage: TaskStage?,
     val toStage: TaskStage,
     val paused: Boolean,
     val currentStep: String,
-    val description: String?,
+    val expectedAction: ExpectedActionResponse,
+    val version: Long,
     val createdAt: Instant,
 ) {
     companion object {
@@ -266,11 +299,16 @@ data class TaskStateHistoryResponse(
             id = entry.id,
             taskId = entry.taskId,
             event = entry.event.name,
+            source = entry.source?.name,
             fromStage = entry.fromStage,
             toStage = entry.toStage,
             paused = entry.paused,
             currentStep = entry.currentStep,
-            description = entry.description,
+            expectedAction = ExpectedActionResponse(
+                entry.expectedActionType,
+                entry.expectedActionDescription,
+            ),
+            version = entry.version,
             createdAt = entry.createdAt,
         )
     }
@@ -393,5 +431,9 @@ data class MemoryInspectorResponse(
 }
 
 data class ApiError(
+    val code: String,
     val message: String,
+    val currentStage: TaskStage? = null,
+    val event: TaskEvent? = null,
+    val version: Long? = null,
 )

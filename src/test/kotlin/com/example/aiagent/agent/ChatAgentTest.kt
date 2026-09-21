@@ -45,11 +45,13 @@ import com.example.aiagent.profile.UserProfile
 import com.example.aiagent.profile.UserProfileService
 import com.example.aiagent.task.AgentTask
 import com.example.aiagent.task.ExpectedActionType
+import com.example.aiagent.task.TaskPausedException
+import com.example.aiagent.task.TaskActionType
+import com.example.aiagent.task.TaskCoordinationResult
 import com.example.aiagent.task.TaskRepository
 import com.example.aiagent.task.TaskService
 import com.example.aiagent.task.TaskStage
 import com.example.aiagent.task.TaskStateCoordinator
-import com.example.aiagent.task.TaskStateService
 import com.example.aiagent.task.TaskStatus
 import io.mockk.every
 import io.mockk.just
@@ -105,12 +107,23 @@ class ChatAgentTest {
         Expected Action Type: USER_INPUT
         Expected Action Description: Provide goals, requirements, and constraints
         Paused: false
+        Version: 0
+
+        LIFECYCLE RULES
+        - Perform only actions permitted for the current stage.
+        - In PLANNING, analyze requirements and prepare a plan; do not implement.
+        - In EXECUTION, implement the approved plan; do not claim final completion.
+        - In VALIDATION, build, test, and verify acceptance criteria.
+        - In DONE, provide read-only status or summary only.
+        - Do not begin implementation before PLAN_APPROVED.
+        - Do not claim completion before VALIDATION_PASSED.
+        - Never assign Task Stage directly.
+        - Stage changes only through an accepted TaskEvent.
         """.trimIndent(),
     )
     private val taskService = mockk<TaskService> {
         every { activeTask() } returns activeTask
     }
-    private val taskStateService = mockk<TaskStateService>(relaxed = true)
     private val emptyInvariantSet = TaskInvariantSet.empty(activeTask.id, activeTask.name)
     private val taskInvariantService = mockk<TaskInvariantService> {
         every { snapshot(activeTask) } returns emptyInvariantSet
@@ -121,7 +134,8 @@ class ChatAgentTest {
         every { maxCorrectiveRetries } returns 1
     }
     private val taskStateCoordinator = mockk<TaskStateCoordinator>(relaxed = true) {
-        every { analyzeBeforeMainRequest(activeTask, any()) } returns activeTask
+        every { analyzeBeforeMainRequest(activeTask, any()) } returns
+            TaskCoordinationResult.Ready(activeTask, TaskActionType.NONE, null)
     }
     private val memoryService = mockk<MemoryService>(relaxed = true) {
         every { context(activeTask) } returns MemoryContext(emptyList(), emptyList())
@@ -138,7 +152,6 @@ class ChatAgentTest {
         contextStateService = contextStateService,
         branchService = branchService,
         taskService = taskService,
-        taskStateService = taskStateService,
         taskInvariantService = taskInvariantService,
         invariantGuardService = invariantGuardService,
         taskStateCoordinator = taskStateCoordinator,
@@ -177,7 +190,8 @@ class ChatAgentTest {
             expectedActionDescription = "Implement Room and Booking repositories",
         )
         val userMessage = ChatMessage(Role.USER, "План подтверждаю. Начинай реализацию.")
-        every { taskStateCoordinator.analyzeBeforeMainRequest(activeTask, userMessage) } returns executionTask
+        every { taskStateCoordinator.analyzeBeforeMainRequest(activeTask, userMessage) } returns
+            TaskCoordinationResult.Ready(executionTask, TaskActionType.IMPLEMENT, com.example.aiagent.task.TaskEvent.PLAN_APPROVED)
         every { memoryService.context(executionTask) } returns MemoryContext(emptyList(), emptyList())
         val request = slot<LlmRequest>()
         every { openAiClient.chat(capture(request)) } returns response("Начинаю реализацию.")
@@ -363,7 +377,6 @@ class ChatAgentTest {
             contextStateService = contextStateService,
             branchService = branchService,
             taskService = taskService,
-            taskStateService = taskStateService,
             taskInvariantService = taskInvariantService,
             invariantGuardService = invariantGuardService,
             taskStateCoordinator = taskStateCoordinator,
@@ -438,7 +451,6 @@ class ChatAgentTest {
             contextStateService = contextStateService,
             branchService = branchService,
             taskService = taskService,
-            taskStateService = taskStateService,
             taskInvariantService = taskInvariantService,
             invariantGuardService = invariantGuardService,
             taskStateCoordinator = taskStateCoordinator,
@@ -502,7 +514,6 @@ class ChatAgentTest {
             contextStateService = contextStateService,
             branchService = branchService,
             taskService = taskService,
-            taskStateService = taskStateService,
             taskInvariantService = taskInvariantService,
             invariantGuardService = invariantGuardService,
             taskStateCoordinator = taskStateCoordinator,
@@ -594,7 +605,6 @@ class ChatAgentTest {
             contextStateService = contextStateService,
             branchService = branchService,
             taskService = taskService,
-            taskStateService = taskStateService,
             taskInvariantService = taskInvariantService,
             invariantGuardService = invariantGuardService,
             taskStateCoordinator = taskStateCoordinator,
@@ -839,6 +849,37 @@ class ChatAgentTest {
         verify(exactly = 0) { openRouterClient.chat(any()) }
         assertTrue(conversation.messages().isEmpty())
         assertEquals(ConversationTokenUsage.ZERO, conversation.tokenUsage())
+    }
+
+    @Test
+    fun `lifecycle refusal stops before context main LLM conversation and memory mutation`() {
+        every { taskStateCoordinator.analyzeBeforeMainRequest(activeTask, any()) } returns
+            TaskCoordinationResult.Blocked(
+                activeTask,
+                "Текущий этап: PLANNING. Сначала примените PLAN_APPROVED.",
+            )
+
+        val result = agent.sendMessage(agentRequest("Сразу реализуй и заверши"))
+
+        assertTrue(result.content.contains("PLANNING"))
+        assertTrue(conversation.messages().isEmpty())
+        verify(exactly = 0) { memoryService.context(any()) }
+        verify(exactly = 0) { openAiClient.chat(any()) }
+        verify(exactly = 0) { memoryService.extractAfterSuccessfulExchange(any(), any()) }
+        verify(exactly = 0) { memoryService.recordEffectiveContext(any()) }
+    }
+
+    @Test
+    fun `paused Task preserves conversation and working memory against explicit mutations`() {
+        every { taskService.activeTask() } returns activeTask.copy(paused = true)
+
+        assertThrows(TaskPausedException::class.java) { agent.clearWorkingMemory() }
+        assertThrows(TaskPausedException::class.java) { agent.reset() }
+        assertThrows(TaskPausedException::class.java) { agent.createBranch() }
+
+        verify(exactly = 0) { memoryService.clearWorking(any()) }
+        verify(exactly = 0) { contextStateService.reset(any()) }
+        verify(exactly = 0) { branchService.createBranch(any(), any()) }
     }
 
 

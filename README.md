@@ -18,7 +18,7 @@ Spring AI, LangChain и LangChain4j не используются.
 ## Архитектура
 
 ```text
-Browser ─► ChatController/UserProfileController/TaskInvariantController ─► ChatAgent ─► LlmClientResolver ─► OpenAI/OpenRouter
+Browser ─► ChatController/TaskLifecycleController/UserProfileController/TaskInvariantController ─► ChatAgent ─► LlmClientResolver ─► OpenAI/OpenRouter
                                                                         │
                                                                         ├─► InvariantGuardService
                                                                         │     └─► InvariantConflictAnalyzer ─► LlmClientResolver
@@ -34,7 +34,7 @@ Browser ─► ChatController/UserProfileController/TaskInvariantController ─�
                                                                         └─► MemoryExtractor ─► LlmClientResolver
 ```
 
-- `ChatController` отвечает за REST-контракт, validation и вызов provider-neutral `Agent`.
+- `ChatController` и специализированные controllers отвечают за REST-контракт, validation и вызов provider-neutral application services.
 - `ChatAgent` не знает URL, API keys или HTTP headers providers. Для каждого запроса он независимо выбирает `LlmClient` и `ContextStrategy`.
 - Persistent `Task` определяет текущие `Conversation`, branch graph, token usage, Sticky Facts, Working Memory и независимый FSM state. Persistent `UserProfile` — независимое глобальное измерение: переключение Profile не меняет Task или memory.
 - `TaskStateMachine` содержит только детерминированную transition table. `TaskStateService` валидирует события, pause/resume и атомарно сохраняет Task вместе с state history.
@@ -42,7 +42,7 @@ Browser ─► ChatController/UserProfileController/TaskInvariantController ─�
 - Task Invariants образуют hard boundary. Обычный приоритет `current USER > Task State/Working > User Profile > Long-Term > application defaults` действует только внутри допустимого пространства.
 - Input Guard выполняется до `TaskProgressAnalyzer`, Memory Extractor, main LLM и любых изменений Conversation/FSM. Output Guard проверяет candidate до показа, допускает максимум один corrective retry и повторно проверяет исправленный ответ.
 - `MemoryExtractor`, Facts Extractor, Rolling Summary и `TaskProgressAnalyzer` используют собственные prompts и не получают User Profile. Перед основным LLM request analyzer возвращает proposal; persistent FSM может изменить только `TaskStateService`.
-- `SqliteConversationRepository` атомарно сохраняет завершённые пары `USER + ASSISTANT`. Usage записывается с purpose `MAIN_REQUEST`, `INVARIANT_INPUT_GUARD`, `INVARIANT_OUTPUT_GUARD` или `INVARIANT_CORRECTIVE_RETRY`; Conversation totals учитывают только main requests.
+- `SqliteConversationRepository` атомарно сохраняет завершённые пары `USER + ASSISTANT`. Usage записывается с purpose `MAIN_REQUEST`, `TASK_PROGRESS_ANALYZER`, `INVARIANT_INPUT_GUARD`, `INVARIANT_OUTPUT_GUARD` или `INVARIANT_CORRECTIVE_RETRY`; Conversation totals учитывают только main requests.
 - Guard/provider/parser/diagnostic failure при active invariants обрабатывается fail-closed: main LLM и mutable pipeline не запускаются для входного запроса, а нарушающий output не сохраняется и не показывается.
 
 ## Настройка
@@ -175,7 +175,7 @@ UI содержит selector, создание и редактирование P
 
 ### Task State Machine
 
-Каждая Task хранит `stage`, конкретный `currentStep`, тип и описание `expectedAction`, а также ортогональный флаг `paused`. Разрешены только переходы:
+Каждая Task хранит `stage`, конкретный `currentStep`, тип и описание `expectedAction`, ортогональный флаг `paused` и monotonic `version`. Разрешены только переходы:
 
 | Current stage | Event | Next stage |
 |---|---|---|
@@ -184,9 +184,9 @@ UI содержит selector, создание и редактирование P
 | `VALIDATION` | `VALIDATION_PASSED` | `DONE` |
 | `VALIDATION` | `VALIDATION_FAILED` | `EXECUTION` |
 
-Любая другая пара stage/event возвращает `400 Bad Request` и не изменяет Task или history. `PAUSE` и `RESUME` не являются stages: они меняют только `paused`; pause для `DONE` запрещён. `DONE` всегда синхронизирован с `TaskStatus.COMPLETED` и `ExpectedActionType.NONE`.
+Любая другая пара stage/event, повторный event, event во время pause или stale `expectedVersion` возвращают typed `409 Conflict` и не изменяют Task, memory или history. `PAUSE` и `RESUME` не являются stages: они меняют только `paused`; pause для `DONE` запрещён. `DONE` всегда синхронизирован с `TaskStatus.COMPLETED` и `ExpectedActionType.NONE`.
 
-UI показывает stage, current step, expected action, progress indicator, stage-specific event controls, Pause/Resume и persistent State History. В `PLANNING` доступно подтверждение плана, в `EXECUTION` — завершение реализации, в `VALIDATION` — успешный/неуспешный результат проверки; для `DONE` state controls скрыты. Task State добавляется отдельным system block в каждый основной LLM request вне Sliding Window, поэтому короткое сообщение `Продолжай.` сохраняет смысл после reset, pause/restart или выпадения исходного обсуждения из Short-Term.
+UI показывает stage, current step, expected action, pause и version, progress indicator, stage-specific event controls, Pause/Resume и persistent State History. В `PLANNING` доступно подтверждение плана, в `EXECUTION` — завершение реализации, в `VALIDATION` — успешный/неуспешный результат проверки; для `DONE` state controls скрыты. Task State добавляется отдельным system block в каждый основной LLM request вне Sliding Window, поэтому короткое сообщение `Продолжай.` сохраняет смысл после reset, pause/restart или выпадения исходного обсуждения из Short-Term.
 
 Progress analyzer включён по умолчанию и настраивается независимо от основной chat model:
 
@@ -199,7 +199,7 @@ task:
       model: gpt-4o-mini
 ```
 
-Для каждого сообщения активной незавершённой и неприостановленной Task analyzer получает текущий Task State и новое user message **до** основного LLM request. Proposal передаётся в `TaskStateService`: event валидируется тем же `TaskStateMachine`, который обслуживает ручной `POST /events`, затем state и history атомарно сохраняются в SQLite. Analyzer не использует User Profile и не пишет в SQLite напрямую.
+Для каждого сообщения активной незавершённой и неприостановленной Task analyzer получает текущий Task State и новое user message **до** основного LLM request. Analyzer возвращает только event/progress/action proposal. `TaskLifecycleGuard` проверяет, допустимо ли запрошенное действие на текущем или предложенном этапе; blocked запрос не запускает main LLM и не меняет Conversation, Working Memory или state. Разрешённый event валидируется тем же `TaskStateMachine`, который обслуживает ручной `POST /events`, а `TaskStateService` атомарно сохраняет state и history с optimistic version check. Analyzer не использует User Profile и не пишет в SQLite напрямую; его failure обрабатывается fail-closed вне SQL transaction.
 
 ### Memory Layers и Tasks
 
@@ -324,19 +324,19 @@ Create/update принимают `name`, `responseLanguage`, `expertiseLevel`, `
 GET  /api/chat/tasks
 POST /api/chat/tasks
 POST /api/chat/tasks/{taskId}/activate
-POST /api/chat/tasks/{taskId}/events
-POST /api/chat/tasks/{taskId}/progress
-POST /api/chat/tasks/{taskId}/pause
-POST /api/chat/tasks/{taskId}/resume
-GET  /api/chat/tasks/{taskId}/history
-POST /api/chat/tasks/{taskId}/complete
+
+GET  /api/tasks/{taskId}/state
+POST /api/tasks/{taskId}/events
+POST /api/tasks/{taskId}/pause
+POST /api/tasks/{taskId}/resume
+GET  /api/tasks/{taskId}/state-history
 
 GET  /api/chat/memory?contextStrategy=SLIDING_WINDOW
 POST /api/chat/memory/working/clear
 POST /api/chat/memory/long-term/clear
 ```
 
-`events` принимает `event` и optional progress proposal; stage-specific UI controls отправляют именно события (`PLAN_APPROVED`, `EXECUTION_COMPLETED`, `VALIDATION_PASSED`, `VALIDATION_FAILED`), а не целевой stage. `progress` обновляет только `currentStep`/`expectedAction`. Endpoint `complete` применяет `VALIDATION_PASSED` через тот же `TaskStateService` и поэтому отклоняется вне `VALIDATION`. `GET /memory` возвращает три слоя, Last Memory Update и sanitized Effective Context с отдельным Task State block. Working clear действует только на выбранную Task; Long-Term clear глобален.
+`events` принимает только `event` и optional `expectedVersion`; stage-specific UI controls отправляют именно события (`PLAN_APPROVED`, `EXECUTION_COMPLETED`, `VALIDATION_PASSED`, `VALIDATION_FAILED`), а не целевой stage. Pause/Resume принимают optional `expectedVersion`. Ответ каждого mutation endpoint содержит фактически сохранённый backend state; UI не вычисляет следующий stage локально. `GET /memory` возвращает три слоя, Last Memory Update и sanitized Effective Context с отдельным Task State block. Working clear действует только на выбранную Task; Long-Term clear глобален.
 
 ### Task Invariants
 

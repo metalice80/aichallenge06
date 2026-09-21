@@ -27,22 +27,35 @@ class TaskStateMachineTest {
     }
 
     @Test
-    fun `every unspecified stage event pair is rejected`() {
-        val allowed = setOf(
-            TaskStage.PLANNING to TaskEvent.PLAN_APPROVED,
-            TaskStage.EXECUTION to TaskEvent.EXECUTION_COMPLETED,
-            TaskStage.VALIDATION to TaskEvent.VALIDATION_PASSED,
-            TaskStage.VALIDATION to TaskEvent.VALIDATION_FAILED,
+    fun `full four by four matrix allows exactly four and rejects twelve deterministically`() {
+        val allowed = mapOf(
+            (TaskStage.PLANNING to TaskEvent.PLAN_APPROVED) to TaskStage.EXECUTION,
+            (TaskStage.EXECUTION to TaskEvent.EXECUTION_COMPLETED) to TaskStage.VALIDATION,
+            (TaskStage.VALIDATION to TaskEvent.VALIDATION_PASSED) to TaskStage.DONE,
+            (TaskStage.VALIDATION to TaskEvent.VALIDATION_FAILED) to TaskStage.EXECUTION,
         )
+        var acceptedCount = 0
+        var rejectedCount = 0
 
         TaskStage.entries.forEach { stage ->
             TaskEvent.entries.forEach { event ->
-                if (stage to event !in allowed) {
-                    assertThrows(InvalidTaskTransitionException::class.java) {
+                val expected = allowed[stage to event]
+                if (expected != null) {
+                    assertEquals(expected, stateMachine.transition(stage, event))
+                    assertEquals(expected, stateMachine.transition(stage, event))
+                    acceptedCount += 1
+                } else {
+                    val exception = assertThrows(InvalidTaskTransitionException::class.java) {
                         stateMachine.transition(stage, event)
                     }
+                    assertEquals(stage, exception.currentStage)
+                    assertEquals(event, exception.event)
+                    rejectedCount += 1
                 }
             }
         }
+
+        assertEquals(4, acceptedCount)
+        assertEquals(12, rejectedCount)
     }
 }

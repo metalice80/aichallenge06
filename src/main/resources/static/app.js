@@ -20,6 +20,8 @@ const taskCurrentStep = document.querySelector('#task-current-step');
 const taskExpectedAction = document.querySelector('#task-expected-action');
 const taskExpectedDescription = document.querySelector('#task-expected-description');
 const taskPausedBadge = document.querySelector('#task-paused-badge');
+const taskPaused = document.querySelector('#task-paused');
+const taskVersion = document.querySelector('#task-version');
 const taskProgress = document.querySelector('#task-progress');
 const addInvariantButton = document.querySelector('#add-invariant-button');
 const invariantList = document.querySelector('#invariant-list');
@@ -74,7 +76,7 @@ let editingInvariantId = null;
 
 chatForm.addEventListener('submit', async (event) => {
     event.preventDefault();
-    if (busy || activeTask?.status === 'COMPLETED' || activeTask?.paused === true) return;
+    if (busy || activeTask?.paused === true) return;
 
     const message = messageInput.value.trim();
     if (!message) {
@@ -801,10 +803,19 @@ function updateTaskControls() {
     resumeTaskButton.disabled = busy || !paused || completed;
     taskHistoryButton.disabled = busy || !activeTask;
     messageInput.placeholder = completed
-        ? 'Завершённая задача доступна только для просмотра'
+        ? 'Завершённая задача: запросите статус или итоговый summary'
         : paused ? 'Task paused — resume to continue' : 'Введите сообщение...';
-    messageInput.disabled = busy || completed || paused;
-    sendButton.disabled = busy || completed || paused;
+    messageInput.disabled = busy || paused;
+    sendButton.disabled = busy || paused;
+    resetButton.disabled = busy || paused || completed;
+    clearWorkingButton.disabled = busy || paused || completed;
+    clearLongTermButton.disabled = busy || paused || completed;
+    branchSelect.disabled = busy || paused || completed;
+    createBranchButton.disabled = busy || paused || completed;
+    addInvariantButton.disabled = busy || paused || completed || !activeTask;
+    document.querySelectorAll('.invariant-action').forEach((button) => {
+        button.disabled = busy || paused || completed;
+    });
 }
 
 function renderTaskState(task) {
@@ -813,6 +824,8 @@ function renderTaskState(task) {
     taskExpectedAction.textContent = task?.expectedActionType || '—';
     taskExpectedDescription.textContent = task?.expectedActionDescription || '—';
     taskPausedBadge.hidden = task?.paused !== true;
+    taskPaused.textContent = task ? (task.paused === true ? 'Yes' : 'No') : '—';
+    taskVersion.textContent = valueOrDash(task?.version);
     const stages = ['PLANNING', 'EXECUTION', 'VALIDATION', 'DONE'];
     const currentIndex = stages.indexOf(task?.stage);
     taskProgress.querySelectorAll('[data-task-stage]').forEach((item) => {
@@ -826,40 +839,48 @@ async function applyTaskEvent(event) {
     if (busy || !activeTask || activeTask.paused || activeTask.stage === 'DONE') return;
     await runAction(async () => {
         const response = await fetch(
-            `/api/chat/tasks/${encodeURIComponent(activeTask.id)}/events`,
+            `/api/tasks/${encodeURIComponent(activeTask.id)}/events`,
             {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ event }),
+                body: JSON.stringify({ event, expectedVersion: activeTask.version }),
             },
         );
         const payload = await readJson(response);
         if (!response.ok) {
+            if (response.status === 409) await refreshTaskState();
             throw new Error(payload?.message || `Не удалось применить событие ${event}.`);
         }
-        await refreshTaskState();
+        applyReturnedTaskState(payload);
         await loadMemory();
+        if (!taskStateHistory.hidden) await loadTaskStateHistory();
     }, `Не удалось применить событие ${event}.`);
 }
 
 async function changeTaskPauseState(action) {
     await runAction(async () => {
         const response = await fetch(
-            `/api/chat/tasks/${encodeURIComponent(activeTask.id)}/${action}`,
-            { method: 'POST' },
+            `/api/tasks/${encodeURIComponent(activeTask.id)}/${action}`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ expectedVersion: activeTask.version }),
+            },
         );
         const payload = await readJson(response);
         if (!response.ok) {
+            if (response.status === 409) await refreshTaskState();
             throw new Error(payload?.message || `Не удалось выполнить ${action}.`);
         }
-        await refreshTaskState();
+        applyReturnedTaskState(payload);
         await loadMemory();
+        if (!taskStateHistory.hidden) await loadTaskStateHistory();
     }, `Не удалось выполнить ${action}.`);
 }
 
 async function loadTaskStateHistory() {
     const response = await fetch(
-        `/api/chat/tasks/${encodeURIComponent(activeTask.id)}/history`,
+        `/api/tasks/${encodeURIComponent(activeTask.id)}/state-history`,
     );
     const payload = await readJson(response);
     if (!response.ok || !Array.isArray(payload)) {
@@ -880,12 +901,31 @@ async function loadTaskStateHistory() {
 }
 
 async function refreshTaskState() {
-    const restoreHistory = !taskStateHistory.hidden;
-    await loadTasks();
-    if (restoreHistory) {
-        await loadTaskStateHistory();
-        taskStateHistory.hidden = false;
+    if (!activeTask) return;
+    const response = await fetch(`/api/tasks/${encodeURIComponent(activeTask.id)}/state`);
+    const payload = await readJson(response);
+    if (!response.ok) {
+        throw new Error(payload?.message || 'Не удалось обновить Task State.');
     }
+    applyReturnedTaskState(payload);
+}
+
+function applyReturnedTaskState(state) {
+    if (!activeTask || typeof state?.taskId !== 'number' || state.taskId !== activeTask.id) {
+        throw new Error('Сервер вернул Task State для другой задачи.');
+    }
+    activeTask = {
+        ...activeTask,
+        stage: state.stage,
+        currentStep: state.currentStep,
+        expectedActionType: state.expectedAction?.type,
+        expectedActionDescription: state.expectedAction?.description ?? null,
+        paused: state.paused === true,
+        version: state.version,
+        status: state.stage === 'DONE' ? 'COMPLETED' : 'ACTIVE',
+    };
+    renderTaskState(activeTask);
+    updateTaskControls();
 }
 
 async function loadState() {
@@ -1060,6 +1100,7 @@ function appendContextTaskState(container, taskState) {
         diagnosticRow('Expected Action Description', taskState.expectedActionDescription || '—'),
     );
     container.append(diagnosticRow('Paused', String(taskState.paused === true)));
+    container.append(diagnosticRow('Version', valueOrDash(taskState.version)));
 }
 
 function appendContextEntries(container, entries) {

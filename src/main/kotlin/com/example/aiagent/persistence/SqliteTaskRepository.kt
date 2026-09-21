@@ -9,6 +9,7 @@ import com.example.aiagent.task.TaskStage
 import com.example.aiagent.task.TaskStateHistoryEntry
 import com.example.aiagent.task.TaskStateHistoryEvent
 import com.example.aiagent.task.TaskStatus
+import com.example.aiagent.task.TaskStateConflictException
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.stereotype.Repository
 import org.springframework.transaction.annotation.Transactional
@@ -31,7 +32,8 @@ class SqliteTaskRepository(
                 current_step TEXT NOT NULL DEFAULT 'Define goals, requirements, and execution plan',
                 expected_action_type TEXT NOT NULL DEFAULT 'USER_INPUT',
                 expected_action_description TEXT,
-                paused INTEGER NOT NULL DEFAULT 0
+                paused INTEGER NOT NULL DEFAULT 0,
+                version INTEGER NOT NULL DEFAULT 0
             )
             """.trimIndent(),
         )
@@ -44,6 +46,7 @@ class SqliteTaskRepository(
         addColumnIfMissing("agent_task", "expected_action_type", "TEXT NOT NULL DEFAULT 'USER_INPUT'")
         addColumnIfMissing("agent_task", "expected_action_description", "TEXT")
         addColumnIfMissing("agent_task", "paused", "INTEGER NOT NULL DEFAULT 0")
+        addColumnIfMissing("agent_task", "version", "INTEGER NOT NULL DEFAULT 0")
         jdbcTemplate.execute(
             """
             CREATE TABLE IF NOT EXISTS active_task_state (
@@ -58,16 +61,24 @@ class SqliteTaskRepository(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id INTEGER NOT NULL,
                 event TEXT NOT NULL,
+                source TEXT,
                 from_stage TEXT,
                 to_stage TEXT NOT NULL,
                 paused INTEGER NOT NULL,
                 current_step TEXT NOT NULL,
+                expected_action_type TEXT,
+                expected_action_description TEXT,
                 description TEXT,
+                version INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(task_id) REFERENCES agent_task(id)
             )
             """.trimIndent(),
         )
+        addColumnIfMissing("task_state_history", "source", "TEXT")
+        addColumnIfMissing("task_state_history", "expected_action_type", "TEXT")
+        addColumnIfMissing("task_state_history", "expected_action_description", "TEXT")
+        addColumnIfMissing("task_state_history", "version", "INTEGER NOT NULL DEFAULT 0")
         jdbcTemplate.execute(
             "CREATE INDEX IF NOT EXISTS idx_task_state_history_task ON task_state_history(task_id, id)",
         )
@@ -76,11 +87,11 @@ class SqliteTaskRepository(
             """
             INSERT OR IGNORE INTO agent_task(
                 id, name, status, created_at, completed_at, stage, current_step,
-                expected_action_type, expected_action_description, paused
+                expected_action_type, expected_action_description, paused, version
             ) VALUES (
                 1, 'Основная задача', 'ACTIVE', ?, NULL, 'PLANNING',
                 'Define goals, requirements, and execution plan',
-                'USER_INPUT', 'Provide goals, requirements, and constraints', 0
+                'USER_INPUT', 'Provide goals, requirements, and constraints', 0, 0
             )
             """.trimIndent(),
             now,
@@ -92,11 +103,13 @@ class SqliteTaskRepository(
         jdbcTemplate.update(
             """
             INSERT INTO task_state_history(
-                task_id, event, from_stage, to_stage, paused, current_step, description, created_at
+                task_id, event, source, from_stage, to_stage, paused, current_step,
+                expected_action_type, expected_action_description, description, version, created_at
             )
             SELECT
-                t.id, 'TASK_CREATED', NULL, t.stage, t.paused, t.current_step,
-                t.expected_action_description, t.created_at
+                t.id, 'TASK_CREATED', NULL, NULL, t.stage, t.paused, t.current_step,
+                t.expected_action_type, t.expected_action_description,
+                t.expected_action_description, t.version, t.created_at
             FROM agent_task t
             WHERE NOT EXISTS (
                 SELECT 1
@@ -111,7 +124,7 @@ class SqliteTaskRepository(
         """
         SELECT
             t.id, t.name, t.status, t.created_at, t.completed_at, t.stage,
-            t.current_step, t.expected_action_type, t.expected_action_description, t.paused,
+            t.current_step, t.expected_action_type, t.expected_action_description, t.paused, t.version,
             CASE WHEN s.task_id = t.id THEN 1 ELSE 0 END AS selected
         FROM agent_task t
         CROSS JOIN active_task_state s
@@ -131,6 +144,7 @@ class SqliteTaskRepository(
             expectedActionType = ExpectedActionType.valueOf(resultSet.getString("expected_action_type")),
             expectedActionDescription = resultSet.getString("expected_action_description"),
             paused = resultSet.getBoolean("paused"),
+            version = resultSet.getLong("version"),
         )
     }
 
@@ -149,8 +163,8 @@ class SqliteTaskRepository(
             """
             INSERT INTO agent_task(
                 name, status, created_at, completed_at, stage, current_step,
-                expected_action_type, expected_action_description, paused
-            ) VALUES (?, 'ACTIVE', ?, NULL, 'PLANNING', ?, 'USER_INPUT', ?, 0)
+                expected_action_type, expected_action_description, paused, version
+            ) VALUES (?, 'ACTIVE', ?, NULL, 'PLANNING', ?, 'USER_INPUT', ?, 0, 0)
             """.trimIndent(),
             name,
             now.toString(),
@@ -165,11 +179,14 @@ class SqliteTaskRepository(
             NewTaskStateHistoryEntry(
                 taskId = id,
                 event = TaskStateHistoryEvent.TASK_CREATED,
+                source = null,
                 fromStage = null,
                 toStage = TaskStage.PLANNING,
                 paused = false,
                 currentStep = currentStep,
-                description = description,
+                expectedActionType = ExpectedActionType.USER_INPUT,
+                expectedActionDescription = description,
+                version = 0,
                 createdAt = now,
             ),
         )
@@ -200,8 +217,9 @@ class SqliteTaskRepository(
                 current_step = ?,
                 expected_action_type = ?,
                 expected_action_description = ?,
-                paused = ?
-            WHERE id = ?
+                paused = ?,
+                version = version + 1
+            WHERE id = ? AND version = ?
             """.trimIndent(),
             state.status.name,
             state.completedAt?.toString(),
@@ -211,29 +229,44 @@ class SqliteTaskRepository(
             state.expectedActionDescription,
             if (state.paused) 1 else 0,
             taskId,
+            state.expectedVersion,
         )
-        require(updated == 1) { "Task $taskId does not exist" }
+        if (updated != 1) {
+            throw TaskStateConflictException(taskId, state.expectedVersion, findById(taskId)?.version)
+        }
         insertHistory(history)
         return checkNotNull(findById(taskId))
     }
 
     override fun stateHistory(taskId: Long): List<TaskStateHistoryEntry> = jdbcTemplate.query(
         """
-        SELECT id, task_id, event, from_stage, to_stage, paused, current_step, description, created_at
+        SELECT id, task_id, event, source, from_stage, to_stage, paused, current_step,
+               expected_action_type, expected_action_description, description, version, created_at
         FROM task_state_history
         WHERE task_id = ?
         ORDER BY id
         """.trimIndent(),
         { resultSet, _ ->
+            val expectedActionType = resultSet.getString("expected_action_type")
+                ?.let(ExpectedActionType::valueOf)
+                ?: if (TaskStage.valueOf(resultSet.getString("to_stage")) == TaskStage.DONE) {
+                    ExpectedActionType.NONE
+                } else {
+                    ExpectedActionType.USER_INPUT
+                }
             TaskStateHistoryEntry(
                 id = resultSet.getLong("id"),
                 taskId = resultSet.getLong("task_id"),
                 event = TaskStateHistoryEvent.valueOf(resultSet.getString("event")),
+                source = resultSet.getString("source")?.let(com.example.aiagent.task.TaskEventSource::valueOf),
                 fromStage = resultSet.getString("from_stage")?.let(TaskStage::valueOf),
                 toStage = TaskStage.valueOf(resultSet.getString("to_stage")),
                 paused = resultSet.getBoolean("paused"),
                 currentStep = resultSet.getString("current_step"),
-                description = resultSet.getString("description"),
+                expectedActionType = expectedActionType,
+                expectedActionDescription = resultSet.getString("expected_action_description")
+                    ?: resultSet.getString("description"),
+                version = resultSet.getLong("version"),
                 createdAt = Instant.parse(resultSet.getString("created_at")),
             )
         },
@@ -244,16 +277,21 @@ class SqliteTaskRepository(
         jdbcTemplate.update(
             """
             INSERT INTO task_state_history(
-                task_id, event, from_stage, to_stage, paused, current_step, description, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                task_id, event, source, from_stage, to_stage, paused, current_step,
+                expected_action_type, expected_action_description, description, version, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """.trimIndent(),
             entry.taskId,
             entry.event.name,
+            entry.source?.name,
             entry.fromStage?.name,
             entry.toStage.name,
             if (entry.paused) 1 else 0,
             entry.currentStep,
-            entry.description,
+            entry.expectedActionType.name,
+            entry.expectedActionDescription,
+            entry.expectedActionDescription,
+            entry.version,
             entry.createdAt.toString(),
         )
     }

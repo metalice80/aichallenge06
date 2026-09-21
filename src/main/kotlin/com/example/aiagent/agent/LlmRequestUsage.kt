@@ -8,6 +8,7 @@ enum class LlmRequestPurpose {
     INVARIANT_INPUT_GUARD,
     INVARIANT_OUTPUT_GUARD,
     INVARIANT_CORRECTIVE_RETRY,
+    TASK_PROGRESS_ANALYZER,
 }
 
 data class LlmRequestUsage(

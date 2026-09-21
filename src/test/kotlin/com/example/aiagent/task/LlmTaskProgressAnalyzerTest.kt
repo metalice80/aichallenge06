@@ -35,7 +35,8 @@ class LlmTaskProgressAnalyzerTest {
                   "currentStep":"Implement repository adapter",
                   "expectedActionType":"AGENT_ACTION",
                   "expectedActionDescription":"Write SQLite repository code",
-                  "proposedEvent":null
+                  "proposedEvent":null,
+                  "requestedAction":"IMPLEMENT"
                 }
             """.trimIndent(),
             model = "openai/analyzer-model",
@@ -66,10 +67,11 @@ class LlmTaskProgressAnalyzerTest {
             expectedActionDescription = "Propose repository implementation",
         )
 
-        val proposal = analyzer.analyze(
+        val analysis = analyzer.analyze(
             task,
             ChatMessage(Role.USER, "Continue"),
         )
+        val proposal = analysis.proposal
 
         assertEquals("openai/analyzer-model", request.captured.model)
         assertEquals(
@@ -83,6 +85,8 @@ class LlmTaskProgressAnalyzerTest {
         assertEquals("Implement repository adapter", proposal.currentStep)
         assertEquals(ExpectedActionType.AGENT_ACTION, proposal.expectedActionType)
         assertEquals("Write SQLite repository code", proposal.expectedActionDescription)
+        assertEquals(TaskActionType.IMPLEMENT, proposal.requestedAction)
+        assertEquals(TokenUsage(3, 2, 5), analysis.usage)
         verify(exactly = 1) { resolver.resolve(LlmProvider.OPENROUTER) }
     }
 }

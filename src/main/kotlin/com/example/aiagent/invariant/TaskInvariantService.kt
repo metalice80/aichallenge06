@@ -2,6 +2,8 @@ package com.example.aiagent.invariant
 
 import com.example.aiagent.task.AgentTask
 import com.example.aiagent.task.TaskRepository
+import com.example.aiagent.task.InvalidTaskStateException
+import com.example.aiagent.task.TaskPausedException
 import org.springframework.dao.DataAccessException
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -23,7 +25,7 @@ class TaskInvariantService(
 
     @Transactional
     fun create(taskId: Long, command: CreateTaskInvariant): TaskInvariant {
-        requireTask(taskId)
+        requireMutableTask(taskId)
         val normalized = normalize(command)
         return conflictSafe(normalized.key) {
             repository.create(
@@ -41,7 +43,7 @@ class TaskInvariantService(
 
     @Transactional
     fun update(taskId: Long, invariantId: Long, command: UpdateTaskInvariant): TaskInvariant {
-        requireTask(taskId)
+        requireMutableTask(taskId)
         val existing = requireInvariant(taskId, invariantId)
         val normalized = normalize(command)
         return conflictSafe(normalized.key) {
@@ -59,7 +61,7 @@ class TaskInvariantService(
 
     @Transactional
     fun setEnabled(taskId: Long, invariantId: Long, enabled: Boolean): TaskInvariant {
-        requireTask(taskId)
+        requireMutableTask(taskId)
         val existing = requireInvariant(taskId, invariantId)
         if (existing.enabled == enabled) return existing
         return conflictSafe(existing.key) {
@@ -69,7 +71,7 @@ class TaskInvariantService(
 
     @Transactional
     fun delete(taskId: Long, invariantId: Long) {
-        requireTask(taskId)
+        requireMutableTask(taskId)
         requireInvariant(taskId, invariantId)
         if (!repository.delete(taskId, invariantId)) {
             throw TaskInvariantNotFoundException(
@@ -156,6 +158,15 @@ class TaskInvariantService(
     private fun requireTask(taskId: Long): AgentTask =
         taskRepository.findById(taskId)
             ?: throw TaskInvariantNotFoundException("Task $taskId does not exist.")
+
+    private fun requireMutableTask(taskId: Long): AgentTask {
+        val task = requireTask(taskId)
+        if (task.paused) throw TaskPausedException(taskId)
+        if (task.stage == com.example.aiagent.task.TaskStage.DONE) {
+            throw InvalidTaskStateException("Completed Task is read-only", "TASK_DONE")
+        }
+        return task
+    }
 
     private fun requireInvariant(taskId: Long, invariantId: Long): TaskInvariant =
         repository.findByTaskAndId(taskId, invariantId)

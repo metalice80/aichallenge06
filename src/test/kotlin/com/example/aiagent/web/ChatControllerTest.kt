@@ -25,7 +25,6 @@ import com.example.aiagent.web.dto.ChatRequest
 import com.example.aiagent.web.dto.ConversationTokenUsageResponse
 import com.example.aiagent.web.dto.CreateTaskRequest
 import com.example.aiagent.web.dto.TaskEventRequest
-import com.example.aiagent.web.dto.UpdateTaskProgressRequest
 import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
@@ -166,99 +165,20 @@ class ChatControllerTest {
     }
 
     @Test
-    fun `Task endpoints list create switch and complete persistent Tasks`() {
+    fun `Task endpoints list create and switch persistent Tasks`() {
         val createdAt = Instant.parse("2026-01-01T00:00:00Z")
         val task = AgentTask(4, "Booking", TaskStatus.ACTIVE, createdAt, null, selected = true)
         val state = AgentState(emptyList(), ConversationTokenUsage.ZERO)
         every { agent.tasks() } returns listOf(task)
         every { agent.createTask("Booking") } returns state
         every { agent.activateTask(4) } returns state
-        every { agent.completeTask(4) } returns task.copy(
-            status = TaskStatus.COMPLETED,
-            completedAt = createdAt.plusSeconds(10),
-            stage = TaskStage.DONE,
-            currentStep = "Task completed",
-            expectedActionType = ExpectedActionType.NONE,
-            expectedActionDescription = null,
-        )
 
         assertEquals("Booking", controller.tasks().single().name)
         assertEquals(0, controller.createTask(CreateTaskRequest("Booking")).messages.size)
         assertEquals(0, controller.activateTask(4).messages.size)
-        assertEquals(TaskStatus.COMPLETED, controller.completeTask(4).status)
     }
 
 
-    @Test
-    fun `Task state endpoints expose progress events pause resume and history`() {
-        val createdAt = Instant.parse("2026-01-01T00:00:00Z")
-        val task = AgentTask(
-            id = 7,
-            name = "Booking",
-            status = TaskStatus.ACTIVE,
-            createdAt = createdAt,
-            completedAt = null,
-            selected = true,
-            stage = TaskStage.EXECUTION,
-            currentStep = "Implement persistence layer",
-            expectedActionType = ExpectedActionType.AGENT_ACTION,
-            expectedActionDescription = "Propose repository implementation",
-        )
-        val validation = task.copy(
-            stage = TaskStage.VALIDATION,
-            currentStep = "Validate persistence",
-            expectedActionType = ExpectedActionType.VALIDATION,
-            expectedActionDescription = "Run repository tests",
-        )
-        every {
-            agent.updateTaskProgress(
-                7,
-                "Implement SQLite repository",
-                ExpectedActionType.AGENT_ACTION,
-                "Write repository implementation",
-            )
-        } returns task.copy(currentStep = "Implement SQLite repository")
-        every { agent.applyTaskEvent(7, TaskEvent.EXECUTION_COMPLETED, any()) } returns validation
-        every { agent.pauseTask(7) } returns task.copy(paused = true)
-        every { agent.resumeTask(7) } returns task
-        every { agent.taskStateHistory(7) } returns listOf(
-            TaskStateHistoryEntry(
-                id = 1,
-                taskId = 7,
-                event = TaskStateHistoryEvent.EXECUTION_COMPLETED,
-                fromStage = TaskStage.EXECUTION,
-                toStage = TaskStage.VALIDATION,
-                paused = false,
-                currentStep = "Validate persistence",
-                description = "Run repository tests",
-                createdAt = createdAt,
-            ),
-        )
-
-        val progress = controller.updateTaskProgress(
-            7,
-            UpdateTaskProgressRequest(
-                "Implement SQLite repository",
-                ExpectedActionType.AGENT_ACTION,
-                "Write repository implementation",
-            ),
-        )
-        val transitioned = controller.applyTaskEvent(
-            7,
-            TaskEventRequest(
-                event = TaskEvent.EXECUTION_COMPLETED,
-                currentStep = "Validate persistence",
-                expectedActionType = ExpectedActionType.VALIDATION,
-                expectedActionDescription = "Run repository tests",
-            ),
-        )
-
-        assertEquals("Implement SQLite repository", progress.currentStep)
-        assertEquals(TaskStage.VALIDATION, transitioned.stage)
-        assertEquals(true, controller.pauseTask(7).paused)
-        assertEquals(false, controller.resumeTask(7).paused)
-        assertEquals(TaskStateHistoryEvent.EXECUTION_COMPLETED.name, controller.taskStateHistory(7).single().event)
-    }
     @Test
     fun `memory endpoint exposes three layers and clear actions remain separate`() {
         every { agent.memory(ContextStrategyType.SLIDING_WINDOW) } returns MemoryInspector(

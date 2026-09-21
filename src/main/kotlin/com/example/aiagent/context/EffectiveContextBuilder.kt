@@ -135,7 +135,19 @@ class EffectiveContextBuilder(
         appendLine("Current Step: ${task.currentStep}")
         appendLine("Expected Action Type: ${task.expectedActionType}")
         appendLine("Expected Action Description: ${task.expectedActionDescription ?: "(none)"}")
-        append("Paused: ${task.paused}")
+        appendLine("Paused: ${task.paused}")
+        appendLine("Version: ${task.version}")
+        appendLine()
+        appendLine("LIFECYCLE RULES")
+        appendLine("- Perform only actions permitted for the current stage.")
+        appendLine("- In PLANNING, analyze requirements and prepare a plan; do not implement.")
+        appendLine("- In EXECUTION, implement the approved plan; do not claim final completion.")
+        appendLine("- In VALIDATION, build, test, and verify acceptance criteria.")
+        appendLine("- In DONE, provide read-only status or summary only.")
+        appendLine("- Do not begin implementation before PLAN_APPROVED.")
+        appendLine("- Do not claim completion before VALIDATION_PASSED.")
+        appendLine("- Never assign Task Stage directly.")
+        append("- Stage changes only through an accepted TaskEvent.")
     }
 
     private fun UserProfileSnapshot.redacted() = copy(

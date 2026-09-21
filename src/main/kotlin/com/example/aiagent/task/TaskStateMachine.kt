@@ -23,8 +23,26 @@ class DeterministicTaskStateMachine : TaskStateMachine {
 }
 
 class InvalidTaskTransitionException(
-    stage: TaskStage,
-    event: TaskEvent,
-) : IllegalArgumentException("Task event $event is not valid in stage $stage")
+    val currentStage: TaskStage,
+    val event: TaskEvent,
+) : IllegalArgumentException("Task event $event is not valid in stage $currentStage")
 
-class InvalidTaskStateException(message: String) : IllegalArgumentException(message)
+open class InvalidTaskStateException(
+    message: String,
+    val code: String = "INVALID_TASK_STATE",
+) : IllegalArgumentException(message)
+
+class TaskNotFoundException(taskId: Long) :
+    InvalidTaskStateException("Task $taskId does not exist", "TASK_NOT_FOUND")
+
+class TaskStateConflictException(
+    val taskId: Long,
+    val expectedVersion: Long,
+    val actualVersion: Long?,
+) : InvalidTaskStateException(
+    "Task $taskId version conflict: expected $expectedVersion, actual ${actualVersion ?: "unknown"}",
+    "TASK_VERSION_CONFLICT",
+)
+
+class TaskPausedException(taskId: Long) :
+    InvalidTaskStateException("Task $taskId is paused; resume it before continuing", "TASK_PAUSED")
